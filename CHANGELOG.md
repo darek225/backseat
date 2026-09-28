@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1
+
+- Sidebar tasks now watch workspace file activity as a liveness signal. If
+  the workspace goes quiet for 3 minutes (e.g. a provider error is waiting
+  on the retry button in the chat), Backseat presses Cline's primary button
+  once per quiet spell — clicking retry/approve when one is showing, no-op
+  otherwise. The Backseat tab shows the quiet/retry state.
+
 ## 0.8.0
 
 - **Cline sidebar is now the primary task path**: tasks start visibly in the
