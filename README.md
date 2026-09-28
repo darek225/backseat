@@ -47,13 +47,16 @@ PC pings back the moment a task finishes so your Muse hears about it sooner.
 **3. Install the VS Code plugin.**
 Download [`dist/backseat-latest.vsix`](dist/backseat-latest.vsix), then in
 VS Code: Extensions → `…` → *Install from VSIX*. Requires the Cline extension
-(signed in — your model key never leaves your PC) and Git. Run
-**Backseat: Run setup doctor** from the command palette — it checks every
-link in the chain and tells you what's broken.
+(signed in — your model key never leaves your PC) and Git.
 
-**4. Open your repo folder in VS Code.**
-That's it — Backseat auto-detects the bridge repo and starts polling. No
-settings, no terminal windows, no always-on scripts. Close VS Code and it's off.
+**4. Point it at your repo — one setting.**
+In VS Code settings, set `backseat.bridgeRepo` to your private repo, e.g.
+`darek225/backseat-bridge`. The extension clones it into `~/.backseat/bridge`
+and manages it itself — it works in *every* VS Code window, whatever project
+you have open. No folder to open, no paths to configure.
+
+Then run **Backseat: Run setup doctor** from the command palette — it checks
+every link in the chain and tells you what's broken.
 
 Now chat with Muse: `status` to see what's happening, `queue: <description>`
 to send Cline work. You can also manage projects by texting:
