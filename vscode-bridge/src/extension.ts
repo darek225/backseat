@@ -42,6 +42,7 @@ import {
   transcriptInfo,
   TRANSCRIPT_ERROR_RE,
   transcriptErrorAction,
+  isAwaitingUserAsk,
   findSessionIdByMarker,
   isClaimedByDeadRunner,
 } from './logic';
@@ -1376,15 +1377,19 @@ class BridgeRunner {
     let lastHeartbeat = 0;
     // Liveness comes from the live transcript: new messages mean Cline is
     // progressing. When the transcript goes quiet:
-    // - if the LAST transcript message is ask:'api_req_failed' (a provider
-    //   error waiting on the retry button), press Cline's primary button —
-    //   up to 3 times per quiet spell, and never for credits/auth errors
-    //   (those need a human: top-up or key fix).
+    // - if the tail shows a provider error and Cline is NOT awaiting user
+    //   input, press Cline's primary button (Resume/Retry) — up to 3 times
+    //   per quiet spell, and never for credits/auth errors (those need a
+    //   human: top-up or key fix).
     // - on a generic 3-minute stall with NO error showing, press once — but
     //   never when Cline is asking the user something (an approval or
     //   follow-up question must not be auto-answered).
+    // The quiet delay (30s) lets Cline's error write-burst settle so the
+    // press always lands on the real Retry button; the 5s poll keeps
+    // detection tight. Meaningful notes are sticky — heartbeats must not
+    // clobber them — and clear as soon as the transcript moves again.
     const STALL_MS = 3 * 60 * 1000;
-    const ERROR_RETRY_MS = 60_000;
+    const ERROR_RETRY_MS = 30_000;
     const MAX_ERROR_RETRIES = 3;
     const ERROR_RE = TRANSCRIPT_ERROR_RE;
     let lastMsgMtime = messagesPath ? this.messagesMtimeMs(messagesPath) : Date.now();
@@ -1394,11 +1399,16 @@ class BridgeRunner {
     let errorRetryBlocked = false;
     let consecutiveErrorRetries = 0;
     let stallAwaitingNoted = false;
+    let stickyNote: string | null = sessionId ? `tracking Cline session ${sessionId.slice(-6)}` : null;
+    const setNote = async (note: string | null): Promise<void> => {
+      stickyNote = note;
+      await this.writeStatus(cfg, task.id, 'running', '', note ?? 'cline (sidebar) working');
+    };
     for (;;) {
-      await sleep(10_000);
+      await sleep(5_000);
       if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
         lastHeartbeat = Date.now();
-        await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) working');
+        await this.writeStatus(cfg, task.id, 'running', '', stickyNote ?? 'cline (sidebar) working');
         await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
       }
 
@@ -1438,6 +1448,7 @@ class BridgeRunner {
             errorRetryBlocked = false;
             consecutiveErrorRetries = 0;
             stallAwaitingNoted = false;
+            stickyNote = null; // Cline is progressing — back to the generic note.
           }
           const info = transcriptInfo(messagesPath, 1500);
           transcriptTail = info.text;
@@ -1455,19 +1466,20 @@ class BridgeRunner {
         return { result: ok ? 'success' : 'failed', output: output.slice(0, 8000), exitCode: ok ? 0 : 1 };
       }
 
-      // 2b. Provider error is the LATEST transcript state + quiet spell ->
-      // press Cline's primary button (Resume/Retry). Only when the newest
-      // message really is the error — never blind-fire on a stale error
-      // tail while Cline waits on the user for something else.
+      // 2b. Provider error visible in the transcript + quiet spell -> press
+      // Cline's primary button (Resume/Retry). Fires whenever the tail
+      // shows an error and Cline is NOT awaiting user input for something
+      // else — the error need not be the literal last message (Cline
+      // sometimes writes follow-on lines after the ask).
       const quietMs = Date.now() - lastMsgMtime;
       if (
         sessionId &&
         !errorRetryAttempted &&
         !errorRetryBlocked &&
         quietMs > ERROR_RETRY_MS &&
-        transcriptLastKind === 'api_req_failed' &&
         transcriptTail &&
-        ERROR_RE.test(transcriptTail)
+        ERROR_RE.test(transcriptTail) &&
+        !isAwaitingUserAsk(transcriptLastKind)
       ) {
         errorRetryAttempted = true;
         if (transcriptErrorAction(transcriptTail) === 'manual') {
@@ -1476,23 +1488,13 @@ class BridgeRunner {
           this.out.appendLine(
             `[backseat] transcript shows a credits/auth error on ${task.id} — needs manual action, not auto-pressing.`,
           );
-          await this.writeStatus(
-            cfg,
-            task.id,
-            'running',
-            '',
-            'cline (sidebar) credits/auth issue — manual action needed',
-          );
+          await setNote('cline (sidebar) credits/auth issue — manual action needed');
         } else if (consecutiveErrorRetries >= MAX_ERROR_RETRIES) {
           errorRetryBlocked = true;
           this.out.appendLine(
             `[backseat] ${task.id}: provider still failing after ${MAX_ERROR_RETRIES} auto-retries — manual attention needed.`,
           );
-          await this.writeStatus(
-            cfg,
-            task.id,
-            'running',
-            '',
+          await setNote(
             `cline (sidebar) error persists after ${MAX_ERROR_RETRIES} auto-retries — manual attention needed`,
           );
         } else {
@@ -1500,11 +1502,7 @@ class BridgeRunner {
           this.out.appendLine(
             `[backseat] transcript shows a provider error and Cline is quiet — pressing primary button (retry ${consecutiveErrorRetries}/${MAX_ERROR_RETRIES}).`,
           );
-          await this.writeStatus(
-            cfg,
-            task.id,
-            'running',
-            '',
+          await setNote(
             `cline (sidebar) error seen — retried (${consecutiveErrorRetries}/${MAX_ERROR_RETRIES})`,
           );
           try {
@@ -1517,31 +1515,25 @@ class BridgeRunner {
         sessionId &&
         !retryAttempted &&
         quietMs > STALL_MS &&
-        transcriptLastKind !== 'api_req_failed'
+        !(transcriptTail && ERROR_RE.test(transcriptTail))
       ) {
-        // 2c. Generic stall (no transcript movement at all) -> press once,
-        // but never when Cline is asking the user something — an approval
-        // or follow-up must not be auto-answered.
-        if (transcriptLastKind.startsWith('ask')) {
+        // 2c. Generic stall (no transcript movement at all, and no error
+        // showing — the error path above owns error stalls) -> press once,
+        // but never when Cline is asking the user something.
+        if (isAwaitingUserAsk(transcriptLastKind)) {
           if (!stallAwaitingNoted) {
             stallAwaitingNoted = true;
             this.out.appendLine(
               `[backseat] ${task.id}: Cline is awaiting user input ('${transcriptLastKind}') — not pressing.`,
             );
-            await this.writeStatus(
-              cfg,
-              task.id,
-              'running',
-              '',
-              `cline (sidebar) awaiting your input (${transcriptLastKind})`,
-            );
+            await setNote(`cline (sidebar) awaiting your input (${transcriptLastKind})`);
           }
         } else {
           retryAttempted = true;
           this.out.appendLine(
             `[backseat] no transcript activity for 3m on ${task.id} — pressing Cline's primary button (retry/approve).`,
           );
-          await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) quiet — tried retry');
+          await setNote('cline (sidebar) quiet — tried retry');
           try {
             await api.pressPrimaryButton?.();
           } catch (e: any) {

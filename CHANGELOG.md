@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.6] - 2026-09-28
+### Fixed
+- The error auto-retry was too slow and too strict: it waited 60s and only
+  fired when the LATEST transcript message was exactly `ask:'api_req_failed'`
+  — if Cline wrote anything after the error ask, only the 3-minute stall
+  fallback fired (~4 min observed on a live DeepSeek "invalid request"
+  error). Now: 30s quiet delay, 5s poll, and the retry fires whenever the
+  transcript tail shows a provider error and Cline is not awaiting user
+  input (new `isAwaitingUserAsk()` blocklist — approvals/follow-ups are
+  never auto-answered).
+- Heartbeats no longer clobber meaningful status notes: retry/awaiting-input
+  notes are sticky until the transcript moves again, so the bridge log
+  actually shows what Backseat did while you were away.
+
 ## [0.9.5] - 2026-09-28
 ### Fixed
 - Session discovery could NEVER find sidebar tasks, so the 0.9.0/0.9.3
