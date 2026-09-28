@@ -24,13 +24,27 @@ import * as https from 'https';
 import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
+import {
+  ErrorKind,
+  TaskState,
+  classifyError,
+  completionMarker,
+  deleteProtectionReason,
+  idOf,
+  mergeForgottenProject,
+  mergeLearnedProject,
+  readPublishedNotifyTopic,
+  resolveProjectTarget as resolveProjectTargetPure,
+  shouldRetryTask,
+  tailLines,
+  utcnow,
+} from './logic';
 
 const execFile = promisify(cp.execFile);
 
 /** Marketplace ID of the Cline extension (kept since the "Claude Dev" era). */
 const CLINE_EXTENSION_ID = 'saoudrizwan.claude-dev';
 
-const LOG_TAIL_LINES = 40;
 const LOG_TAIL_BYTES = 8192;
 
 // ---------------------------------------------------------------------------
@@ -64,43 +78,6 @@ interface BridgeTask {
   error?: string | null;
 }
 
-type TaskState = 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'timeout';
-
-/** How a Cline run failed — drives retry policy. */
-type ErrorKind = 'transient' | 'no_credits' | 'context_overflow' | 'timeout' | 'failed';
-
-/**
- * Classify Cline's failure output. Transient errors (rate limits, network
- * blips) are worth retrying with backoff; out-of-credits and context
- * overflow will fail identically on retry, so they fail fast for Muse to
- * triage (top-up, or split the task).
- */
-function classifyError(output: string): ErrorKind {
-  const t = output.toLowerCase();
-  if (
-    /insufficient.*credit|out of.*credit|credits?.*(exhausted|depleted)|exceeded.*quota|quota.*exceeded|\bbilling\b/.test(
-      t,
-    )
-  ) {
-    return 'no_credits';
-  }
-  if (
-    /context.*(too large|too long|exceed|length|limit)|maximum context|token.*limit|exceed.*token|input.*too long|prompt.*too long/.test(
-      t,
-    )
-  ) {
-    return 'context_overflow';
-  }
-  if (
-    /rate.?limit|429|too many requests|overloaded|server error|\b5\d\d\b|econnreset|econnrefused|enotfound|etimedout|network|fetch failed|socket hang up|try again|temporar|unavailable|gateway/.test(
-      t,
-    )
-  ) {
-    return 'transient';
-  }
-  return 'failed';
-}
-
 interface BridgeConfig {
   repoPath: string;
   pollIntervalSec: number;
@@ -128,16 +105,8 @@ interface ClineApi {
 // Small utilities
 // ---------------------------------------------------------------------------
 
-function utcnow(): string {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-function tailLines(text: string, n = LOG_TAIL_LINES): string {
-  return text.split('\n').slice(-n).join('\n');
 }
 
 function readJson(file: string): any {
@@ -277,7 +246,9 @@ class BridgeRunner {
     }
     // Publish the ntfy topic (if configured) so any Muse can discover it
     // from the repo — pairing stays repo-based, no extra setup step.
-    if (cfg.notifyTopic) {
+    // Only write/push when the topic actually changed: rewriting
+    // updated_at on every restart would commit noise each time.
+    if (cfg.notifyTopic && readPublishedNotifyTopic(cfg.repoPath) !== cfg.notifyTopic) {
       writeJsonAtomic(path.join(cfg.repoPath, 'notify.json'), {
         topic: cfg.notifyTopic,
         events: ['task_finished'],
@@ -510,12 +481,11 @@ class BridgeRunner {
         errorKind = this.classifyCliResult(result, output);
       }
 
-      const retryable =
-        errorKind === 'transient' || (errorKind === 'timeout' && via === 'cli');
-      if (result === 'success' || !retryable || attempt > maxRetries) {
+      const decision = shouldRetryTask(result, errorKind, via, attempt, maxRetries);
+      if (!decision.retry) {
         break;
       }
-      const delayMin = attempt === 1 ? 2 : 10;
+      const delayMin = decision.delayMin;
       this.out.appendLine(
         `[backseat] task ${task.id} hit ${errorKind}; retrying in ${delayMin}m (attempt ${attempt + 1}/${maxRetries + 1})`,
       );
@@ -623,14 +593,9 @@ class BridgeRunner {
         if (!fs.existsSync(resolved)) {
           throw new Error(`project does not exist: ${resolved}`);
         }
-        const protectedPaths = [
-          os.homedir(),
-          cfg.repoPath,
-          path.parse(resolved).root,
-          '/',
-        ].map((p) => path.resolve(p));
-        if (protectedPaths.includes(resolved)) {
-          throw new Error(`refusing to delete protected path: ${resolved}`);
+        const refusal = deleteProtectionReason(resolved, os.homedir(), cfg.repoPath);
+        if (refusal) {
+          throw new Error(refusal);
         }
         this.out.appendLine(`[backseat] DELETING project directory: ${resolved}`);
         fs.rmSync(resolved, { recursive: true, force: true });
@@ -657,21 +622,7 @@ class BridgeRunner {
     cfg: BridgeConfig,
     task: BridgeTask,
   ): { targetPath: string; name: string } {
-    const args = task.args ?? {};
-    if (args.project) {
-      const name = String(args.project);
-      const mapped = this.readProjectMap(cfg)[name];
-      if (!mapped) {
-        throw new Error(`unknown project "${name}" — add it to projects.json in the bridge repo`);
-      }
-      return { targetPath: mapped, name };
-    }
-    const rawPath = args.path?.trim();
-    if (!rawPath) {
-      throw new Error('command task needs args.project (a name from projects.json) or args.path');
-    }
-    const name = args.name?.trim() || path.basename(path.resolve(rawPath));
-    return { targetPath: rawPath, name };
+    return resolveProjectTargetPure(task.args, this.readProjectMap(cfg));
   }
 
   private readProjectMap(cfg: BridgeConfig): Record<string, string> {
@@ -687,10 +638,9 @@ class BridgeRunner {
   private async learnProject(cfg: BridgeConfig, name: string, targetPath: string): Promise<void> {
     const file = path.join(cfg.repoPath, 'projects.json');
     const map = this.readProjectMap(cfg);
-    if (map[name] === targetPath) {
+    if (!mergeLearnedProject(map, name, targetPath).changed) {
       return;
     }
-    map[name] = targetPath;
     writeJsonAtomic(file, map);
     await pushChanges(cfg.repoPath, `projects.json: learned "${name}"`, this.out);
   }
@@ -698,10 +648,9 @@ class BridgeRunner {
   private async forgetProject(cfg: BridgeConfig, name: string, targetPath: string): Promise<void> {
     const file = path.join(cfg.repoPath, 'projects.json');
     const map = this.readProjectMap(cfg);
-    if (map[name] !== targetPath) {
+    if (!mergeForgottenProject(map, name, targetPath).changed) {
       return;
     }
-    delete map[name];
     writeJsonAtomic(file, map);
     await pushChanges(cfg.repoPath, `projects.json: forgot "${name}"`, this.out);
   }
@@ -1116,8 +1065,32 @@ class BridgeRunner {
       });
       mark(
         lsRemote.code === 0,
-        'git push/pull auth works',
+        'git read access works (ls-remote)',
         lsRemote.code === 0 ? 'reached origin' : lsRemote.out.slice(-200).trim() || 'failed',
+      );
+
+      // ls-remote only proves READ. The whole bridge is push-based (claims,
+      // statuses, results), so also prove WRITE without pushing anything:
+      // `git push --dry-run` exercises push auth and dies on permission
+      // errors, but never sends objects.
+      const pushDry = await new Promise<{ code: number; out: string }>((resolve) => {
+        cp.execFile(
+          'git',
+          ['push', '--dry-run', 'origin', 'HEAD'],
+          {
+            cwd: cfg.repoPath,
+            timeout: 20_000,
+            windowsHide: true,
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          },
+          (err: any, stdout: string, stderr: string) =>
+            resolve({ code: err ? 1 : 0, out: String(stdout ?? '') + String(stderr ?? '') }),
+        );
+      });
+      mark(
+        pushDry.code === 0,
+        'git push permission works (dry-run, pushes nothing)',
+        pushDry.code === 0 ? 'push auth OK' : pushDry.out.slice(-200).trim() || 'failed',
       );
 
       const clineCmd = cfg.clineCommand || 'cline';
@@ -1160,41 +1133,6 @@ class BridgeRunner {
         : `Backseat doctor: ${fails} check(s) failed — details in Output > Backseat.`,
     );
   }
-}
-
-// ---------------------------------------------------------------------------
-// Completion-marker heuristics for Cline's (undocumented) history schema
-// ---------------------------------------------------------------------------
-
-function idOf(entry: unknown): string | undefined {
-  if (entry && typeof entry === 'object') {
-    const o = entry as Record<string, unknown>;
-    for (const k of ['id', 'taskId', 'task_id']) {
-      if (typeof o[k] === 'string' && (o[k] as string)) {
-        return o[k] as string;
-      }
-    }
-  }
-  return undefined;
-}
-
-/** Returns 'done' | 'failed' | undefined based on common completion markers. */
-function completionMarker(entry: unknown): 'done' | 'failed' | undefined {
-  if (!entry || typeof entry !== 'object') {
-    return undefined;
-  }
-  const o = entry as Record<string, unknown>;
-  const candidates: unknown[] = [o.status, o.state, o.result, o.completed, o.isComplete, o.done];
-  for (const c of candidates) {
-    const s = String(c ?? '').toLowerCase();
-    if (/(complete|done|finish|success)/.test(s) && !/incomplete|unfinished/.test(s)) {
-      return 'done';
-    }
-    if (/(fail|error|cancel|abort)/.test(s)) {
-      return 'failed';
-    }
-  }
-  return undefined;
 }
 
 // ---------------------------------------------------------------------------

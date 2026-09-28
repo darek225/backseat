@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Setup Doctor honesty fix**: the "git push/pull auth works" check only ran
+  `git ls-remote`, which proves *read* access. It is now labeled "git read
+  access works (ls-remote)", and a new check runs `git push --dry-run` to
+  prove *write* permission without pushing anything. The whole bridge is
+  push-based (claims, statuses, results), so a read-only remote would have
+  passed the old doctor and then failed at runtime.
+- **No more notify.json churn**: the extension rewrote and pushed `notify.json`
+  on every restart (the `updated_at` timestamp always differed). It now reads
+  the published topic first and only writes/pushes when the topic actually
+  changed.
+- **Refactor for testability**: pure logic (error classification, retry
+  policy, project-nickname resolution, projects.json auto-learn/forget merge
+  rules, deleteProject protection, Cline history heuristics, notify-topic
+  read) extracted from `extension.ts` into `src/logic.ts`; behavior unchanged.
+
 ## 0.5.0
 
 - **Instant task-finished pings via ntfy.sh** (optional): set
