@@ -215,9 +215,15 @@ a task that's merely slow.
 
 ## Concurrency
 
-One task at a time per PC. If two watchers ever run, the claim step
-(`git mv` + push) is the lock: whoever pushes the claim first wins;
-the loser sees its push rejected, pulls, and finds the task gone.
+One task at a time per PC. If two watchers ever run against the same bridge
+(e.g. a desktop and a laptop), the claim step is the lock: whoever pushes
+the claim first wins. The claim file in `tasks/active/` is stamped with
+`claimed_by` (a unique id per watcher process). The loser sees its push
+rejected, fetches, reads the winner's `claimed_by`, and backs off — it
+uncommits only its own claim and syncs those two paths to the winner's
+state, so the task runs exactly once and the loser's next pull stays clean.
+A rejected push with *no* winner's claim on origin is transient
+(network/auth); the local claim stands and the next push carries it.
 
 ## Clock skew
 

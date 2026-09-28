@@ -1,6 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.7.1
+
+- **Seamless Muse-side setup**: the docs no longer ask new users to hand-craft
+  a fine-grained token. `gh auth login` with the device flow (~30s, one code
+  at github.com/device) is the documented default in README and MUSE.md;
+  the token route is a fallback. Muse-side GitHub work is headless
+  (`git`/`gh` CLI only) by documented rule.
+- **Claim race fixed**: two watchers racing for the same task could both run
+  it. Claims are now stamped with a unique `claimed_by` runner id; the loser
+  of a rejected push reads the winner's stamp, backs off, and syncs cleanly.
+  Verified with a two-clone git simulation.
+- **Dashboard hardening**: the webview now ships a Content-Security-Policy
+  with a script nonce (without it VS Code silently blocks the tab's buttons),
+  the doctor renders inside the tab without yanking open the Output panel,
+  and **Check now** runs a real poll cycle even while polling is stopped.
+- **Tests**: `npm test` — 23 unit/static tests (pure logic + dashboard
+  security contract), run headless with node:test, no new dependencies.
+- **LICENSE**: MIT license added (package.json already claimed MIT).
+
+
+## 0.7.0
 
 - **Sidebar dashboard tab**: Backseat now has its own activity-bar tab (the
   steering-wheel icon) — live status, bridge-repo + ping-topic setup with a
