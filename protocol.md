@@ -192,7 +192,6 @@ This is the fast path for "what's happening right now".
 5. Muse's poller sees the done task + final status, reports to Darek.
 
 ## Failure handling
-
 Cline runs fail for flaky reasons (rate limits, network blips, overloaded
 models). The watcher retries instead of stalling:
 
@@ -212,6 +211,21 @@ task failed rather than hanging. `attempts` records the total tries.
 closed, PC asleep, crash). Move the task JSON back to `tasks/pending/` for a
 fresh attempt — but only after that staleness threshold, to avoid double-running
 a task that's merely slow.
+
+**Cancelling a running task (Muse side, v0.9.7+):** the extension runs one
+task at a time, and a stuck watcher would otherwise block the queue until
+its `timeout_sec` expires. To cancel remotely with pure git (no extra
+setup, no ntfy needed):
+1. Write `tasks/done/<id>.json` with `result: "cancelled"` and a note
+   saying why (e.g. user-verified complete, superseded, wrong prompt).
+2. Delete `tasks/active/<id>.json`.
+3. Commit and push.
+The watcher's loop fetches origin every ~30s and checks whether its active
+file still exists on the remote (`git cat-file -e <upstream>:tasks/active/<id>.json`).
+When it's gone, the loop stops within ~30s as `cancelled` — without
+overwriting the done record you wrote — and the next pending task is
+picked up on the following poll. A failed fetch is fail-open: the task
+keeps running, so a network blip never cancels work.
 
 ## Concurrency
 

@@ -43,6 +43,7 @@ import {
   TRANSCRIPT_ERROR_RE,
   transcriptErrorAction,
   isAwaitingUserAsk,
+  isRemoteCancelled,
   findSessionIdByMarker,
   isClaimedByDeadRunner,
 } from './logic';
@@ -1331,6 +1332,37 @@ class BridgeRunner {
 
 
   /**
+   * Does tasks/active/<id>.json still exist on the remote? Used for
+   * remote-cancel: the Muse side cancels by moving the active file to
+   * tasks/done/ on origin. Returns null when it cannot be determined
+   * (fetch failure) — the caller must fail open and keep running.
+   * Fetch never touches the working tree, so this is safe mid-run.
+   */
+   private async remoteActiveTaskExists(
+    repoPath: string,
+    taskId: string,
+  ): Promise<boolean | null> {
+    try {
+      const fetch = await git(repoPath, ['fetch', '--quiet', 'origin']);
+      if (fetch.code !== 0) {
+        return null;
+      }
+      const up = await git(repoPath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+      if (up.code !== 0) {
+        return null;
+      }
+      const check = await git(repoPath, [
+        'cat-file',
+        '-e',
+        `${up.out.trim()}:tasks/active/${taskId}.json`,
+      ]);
+      return check.code === 0;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Watch a Cline sidebar session until it finishes: done-file handshake
    * first, then terminal session status, then transcript-error retry
    * (presses Cline's primary button = Resume/Retry), then stall retry.
@@ -1404,8 +1436,26 @@ class BridgeRunner {
       stickyNote = note;
       await this.writeStatus(cfg, task.id, 'running', '', note ?? 'cline (sidebar) working');
     };
+    let iter = 0;
     for (;;) {
       await sleep(5_000);
+      iter++;
+      // Remote cancel (~every 30s): if the Muse side moved our active file
+      // to tasks/done/ on origin, stop now so the next pending task can
+      // run. Fail-open: an undeterminable state keeps the task running.
+      if (iter % 6 === 0) {
+        const stillActive = await this.remoteActiveTaskExists(cfg.repoPath, task.id);
+        if (isRemoteCancelled(stillActive)) {
+          this.out.appendLine(
+            `[backseat] ${task.id} was cancelled remotely (active file gone from origin) — stopping.`,
+          );
+          return {
+            result: 'cancelled',
+            output: 'cancelled remotely via the bridge repo; the done record was written by the cancelling side',
+            exitCode: 0,
+          };
+        }
+      }
       if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
         lastHeartbeat = Date.now();
         await this.writeStatus(cfg, task.id, 'running', '', stickyNote ?? 'cline (sidebar) working');
@@ -1684,7 +1734,14 @@ class BridgeRunner {
         task = { ...existing, ...task };
         fs.unlinkSync(activePath);
       }
-      writeJsonAtomic(donePath, task);
+      // A remote cancel writes the done record itself (with the human's
+      // note) before the runner notices — never overwrite it with the
+      // runner's bare-bones version. If no record exists yet (race),
+      // write ours as the backstop.
+      const doneExists = fs.existsSync(donePath);
+      if (!(result === 'cancelled' && doneExists)) {
+        writeJsonAtomic(donePath, task);
+      }
     } catch (e: any) {
       this.out.appendLine(`[backseat] could not move task file for ${task.id}: ${e?.message}`);
     }

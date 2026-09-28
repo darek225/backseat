@@ -358,6 +358,20 @@ export function isAwaitingUserAsk(lastKind: string): boolean {
 }
 
 /**
+ * Remote-cancel decision. The Muse side cancels a running task by moving
+ * tasks/active/<id>.json to tasks/done/<id>.json on origin. The watch loop
+ * never pulls (it would disturb its own heartbeat commits), so it checks
+ * the remote ref directly via fetch + cat-file.
+ *   true  -> the task file is still on origin: keep running.
+ *   false -> gone from origin: someone cancelled it, stop now.
+ *   null  -> could not determine (network/fetch failure): FAIL OPEN, keep
+ *            running. A network blip must never cancel a task.
+ */
+export function isRemoteCancelled(remoteActiveExists: boolean | null): boolean {
+  return remoteActiveExists === false;
+}
+
+/**
  * Decide what Backseat may do about a transcript-visible provider error.
  * Credits/quota/auth failures will fail identically on retry, so they are
  * 'manual' — surface them, never auto-press. Everything else is 'retry'.

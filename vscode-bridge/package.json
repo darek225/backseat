@@ -125,6 +125,6 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.6",
+  "version": "0.9.7",
   "icon": "images/icon.png"
 }

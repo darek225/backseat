@@ -280,6 +280,12 @@ test('transcriptErrorAction: credits and auth are manual, provider errors retry'
   assert.equal(logic.transcriptErrorAction('api_req_failed: 429 rate limit, try again later'), 'retry');
 });
 
+test('isRemoteCancelled: only a definite remote deletion cancels, unknown fails open', () => {
+  assert.equal(logic.isRemoteCancelled(false), true);
+  assert.equal(logic.isRemoteCancelled(true), false);
+  assert.equal(logic.isRemoteCancelled(null), false);
+});
+
 test('isAwaitingUserAsk: user-facing asks blocked, error and say kinds allowed', () => {
   assert.equal(logic.isAwaitingUserAsk('followup'), true);
   assert.equal(logic.isAwaitingUserAsk('tool'), true);
