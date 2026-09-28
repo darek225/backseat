@@ -14,30 +14,45 @@ in the repo.
 | `tasks/status/`  | Watcher    | Live status per task id (updated often)   |
 | `reports/`         | Muse       | Morning digests (`YYYY-MM-DD-digest.md`)  |
 | `projects.json`    | Both       | Nickname → PC path map for projects       |
-| `notify.json`      | Watcher    | ntfy.sh topic for instant task-finished pings (optional) |
+| `notify.json`      | Watcher    | ntfy.sh topic for instant pings, both directions (optional) |
 
 ## Instant notifications (`notify.json`, optional)
 
-Git polling works but is slow. For near-instant completion pings, set
-`backseat.notifyTopic` in VS Code to any unguessable string (e.g.
-`backseat-9f3k7q2x`). On every task completion the extension POSTs a small
-"task finished" message to `https://ntfy.sh/<topic>` (free, no account) and
-publishes the topic here:
+Git polling works but is slow. For near-instant pings in both directions,
+set `backseat.notifyTopic` in VS Code to any unguessable string (e.g.
+`backseat-9f3k7q2x`). The extension publishes the topic here:
 
 ```json
 {
   "topic": "backseat-9f3k7q2x",
-  "events": ["task_finished"],
+  "events": ["task_finished", "new_task"],
   "updated_at": "2026-09-28T01:10:00Z"
 }
 ```
 
-Muse's fast path: read the topic from `notify.json`, then poll
+**PC → Muse (task finished):** on every task completion the extension POSTs
+a small "task finished" message to `https://ntfy.sh/<topic>` (free, no
+account). Muse's fast path: read the topic from `notify.json`, then poll
 `https://ntfy.sh/<topic>/json?since=<last-seen-id>` for new pings instead of
 blind git polling. Git remains the source of truth — a lost ping is harmless
 because the next git poll catches up. The ping payload carries only the task
-id, title, and result; never any secrets. Leave `backseat.notifyTopic` empty
-to disable; everything still works on git polling alone.
+id, title, and result; never any secrets.
+
+**Muse → PC (new task wake-up):** after pushing a task file, the Muse side
+POSTs a one-line ping to the same topic:
+
+```
+curl -s -d "new task <task-id>" "https://ntfy.sh/<topic>"
+```
+
+The extension holds an outbound listen stream on the topic (plain HTTPS —
+no open ports, no server) and polls immediately on any message, so task
+pickup drops from "up to one poll interval" to ~1 second. The stream is
+best-effort with automatic reconnect; if it ever dies, timer polling is
+still the fallback, so nothing breaks.
+
+Leave `backseat.notifyTopic` empty to disable; everything still works on
+git polling alone.
 
 File names are always `<task-id>.json`. Task ids are short, unique,
 filesystem-safe strings, e.g. `20260928-001-auth` or a short uuid hex.
