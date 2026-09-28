@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.7] - 2026-09-28
+### Added
+- Remote cancel for running tasks (pure git, no new setup): the Muse side
+  cancels by writing `tasks/done/<id>.json` (`result: "cancelled"` + note)
+  and deleting `tasks/active/<id>.json` on origin. The sidebar watch loop
+  fetches origin every ~30s and stops within ~30s when its active file is
+  gone from the remote — previously a stuck watcher blocked the queue
+  until its full `timeout_sec` expired and the only fix was a window
+  reload. A failed fetch is fail-open (network blips never cancel work),
+  and the runner never overwrites the canceller's done record.
+  New `isRemoteCancelled()` in logic.ts; cancel procedure documented in
+  protocol.md.
+
 ## [0.9.6] - 2026-09-28
 ### Fixed
 - The error auto-retry was too slow and too strict: it waited 60s and only
