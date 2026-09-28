@@ -196,6 +196,13 @@ async function pushChanges(
 class BridgeRunner {
   private timer: NodeJS.Timeout | undefined;
   private taskRunning = false;
+  /** ntfy wake-up stream (Muse → PC instant wake, outbound HTTPS only — no open ports). */
+  private ntfyReq: ReturnType<typeof https.request> | undefined;
+  private ntfyReconnectTimer: NodeJS.Timeout | undefined;
+  private ntfyWatchdog: NodeJS.Timeout | undefined;
+  private ntfyStopped = true;
+  private ntfyBackoffMs = 5000;
+  private wakePollQueued = false;
   private statusBar: vscode.StatusBarItem;
   private currentTaskLabel = '';
   private lastPushAt = 0;
@@ -280,7 +287,7 @@ class BridgeRunner {
     if (cfg.notifyTopic) {
       writeJsonAtomic(path.join(cfg.repoPath, 'notify.json'), {
         topic: cfg.notifyTopic,
-        events: ['task_finished'],
+        events: ['task_finished', 'new_task'],
         updated_at: utcnow(),
       });
       await pushChanges(cfg.repoPath, 'notify.json: publish ntfy topic', this.out);
@@ -290,6 +297,10 @@ class BridgeRunner {
     // Check immediately, then on the interval.
     void this.pollOnce();
     this.timer = setInterval(() => void this.pollOnce(), cfg.pollIntervalSec * 1000);
+    // Instant wake-ups: the Muse side pings the ntfy topic after pushing a
+    // task, so pickup is ~1s instead of up to one poll interval. The stream
+    // is best-effort — timer polling always remains the fallback.
+    this.startNtfyWake(cfg);
   }
 
   stop(): void {
@@ -297,8 +308,130 @@ class BridgeRunner {
       clearInterval(this.timer);
       this.timer = undefined;
     }
+    this.stopNtfyWake();
     this.setStatus('stopped');
     this.out.appendLine('[backseat] stopped');
+  }
+
+  /**
+   * Instant wake-up subscription (Muse → PC). Holds an outbound SSE/JSON
+   * stream on the ntfy topic — no open ports, no server. When the Muse side
+   * publishes a ping after pushing a task file, we poll immediately instead
+   * of waiting for the next interval. Never throws: a dead stream just
+   * means we fall back to timer polling.
+   */
+  private startNtfyWake(cfg: BridgeConfig): void {
+    this.stopNtfyWake();
+    const topic = cfg.notifyTopic?.trim();
+    if (!topic) {
+      return;
+    }
+    this.ntfyStopped = false;
+    this.ntfyBackoffMs = 5000;
+    const streamPath = `/${encodeURIComponent(topic)}/json`;
+    const WATCHDOG_MS = 5 * 60_000;
+
+    const armWatchdog = () => {
+      if (this.ntfyWatchdog) {
+        clearTimeout(this.ntfyWatchdog);
+      }
+      this.ntfyWatchdog = setTimeout(() => {
+        this.out.appendLine('[backseat] ntfy wake stream quiet too long, reconnecting');
+        this.ntfyReq?.destroy();
+        // 'close'/'error' on the request schedules the reconnect.
+      }, WATCHDOG_MS);
+    };
+
+    const scheduleReconnect = () => {
+      if (this.ntfyStopped) {
+        return;
+      }
+      const delay = this.ntfyBackoffMs;
+      this.ntfyBackoffMs = Math.min(this.ntfyBackoffMs * 2, 60_000);
+      this.ntfyReconnectTimer = setTimeout(connect, delay);
+      this.out.appendLine(`[backseat] ntfy wake stream reconnecting in ${Math.round(delay / 1000)}s`);
+    };
+
+    const connect = () => {
+      if (this.ntfyStopped) {
+        return;
+      }
+      let buf = '';
+      const req = https.request(
+        { hostname: 'ntfy.sh', path: streamPath, method: 'GET', headers: { Accept: 'application/json' } },
+        (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            this.out.appendLine(`[backseat] ntfy wake stream HTTP ${res.statusCode} (non-fatal)`);
+            scheduleReconnect();
+            return;
+          }
+          this.ntfyBackoffMs = 5000; // healthy connection: reset backoff
+          this.out.appendLine('[backseat] ntfy wake stream connected — task pickup is instant');
+          armWatchdog();
+          res.on('data', (chunk: Buffer) => {
+            buf += chunk.toString('utf8');
+            armWatchdog();
+            let nl: number;
+            while ((nl = buf.indexOf('\n')) >= 0) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) {
+                continue;
+              }
+              try {
+                const msg = JSON.parse(line);
+                // Any published message on our topic is a doorbell: pull
+                // now instead of waiting for the next interval.
+                if (msg && msg.event === 'message') {
+                  this.queueWakePoll();
+                }
+              } catch {
+                /* ignore malformed lines */
+              }
+            }
+          });
+          res.on('end', scheduleReconnect);
+          res.on('close', scheduleReconnect);
+        },
+      );
+      req.on('error', (e) => {
+        this.out.appendLine(`[backseat] ntfy wake stream error (non-fatal): ${(e as Error).message}`);
+        scheduleReconnect();
+      });
+      req.end();
+      this.ntfyReq = req;
+    };
+
+    connect();
+  }
+
+  private stopNtfyWake(): void {
+    this.ntfyStopped = true;
+    if (this.ntfyReconnectTimer) {
+      clearTimeout(this.ntfyReconnectTimer);
+      this.ntfyReconnectTimer = undefined;
+    }
+    if (this.ntfyWatchdog) {
+      clearTimeout(this.ntfyWatchdog);
+      this.ntfyWatchdog = undefined;
+    }
+    if (this.ntfyReq) {
+      this.ntfyReq.destroy();
+      this.ntfyReq = undefined;
+    }
+  }
+
+  /** Wake-up from the ntfy stream: poll now, debounced so a burst of pings = one pull. */
+  private queueWakePoll(): void {
+    if (this.wakePollQueued) {
+      return;
+    }
+    this.wakePollQueued = true;
+    setTimeout(() => {
+      this.wakePollQueued = false;
+      void this.pollOnce();
+    }, 500);
   }
 
   get isRunning(): boolean {

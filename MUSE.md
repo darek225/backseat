@@ -23,7 +23,21 @@ No open ports. No shared API keys. GitHub is the only wire.
    what pairs their Muse to their Cline and nobody else's: only this Muse
    knows the repo, only their PC has it cloned. Then clone their copy locally
    (you have the user's GitHub access).
-2. **Read `protocol.md`** — the exact JSON schemas for task files and status files.
+2. **Get GitHub access that survives.** You need read+write on the private
+   bridge repo, independent of any chat session. Two good paths — pick one
+   and verify it with `gh repo view <owner>/<repo>`:
+   - `gh auth login` on the machine you run from (the user completes the
+     browser/device flow once), or
+   - a **fine-grained personal access token**: GitHub → Settings →
+     Developer settings → Personal access tokens → Fine-grained tokens →
+     Generate new token → Repository access: *Only select repositories* →
+     pick the private bridge repo → Permissions: **Contents: Read and
+     write**. Then `echo "$TOKEN" | gh auth login --with-token` (never paste
+     the raw token into chat or a file — use the secure flow the user offers).
+   - Tokens expire. When this one dies, the queue goes silent: tasks pile up
+     in `tasks/pending/` with no heartbeats. If you see that, tell the user
+     to rotate the token — don't keep queueing into a dead bridge.
+3. **Read `protocol.md`** — the exact JSON schemas for task files and status files.
 3. **Set up a recurring check** (cron): every few minutes, `git pull` the
    bridge repo and summarize `tasks/pending/`, `tasks/active/`,
    `tasks/done/` and `tasks/status/`. Report anything new to the user in
@@ -48,7 +62,18 @@ No open ports. No shared API keys. GitHub is the only wire.
 ## How to write a task
 
 Create `tasks/<id>.json` in `tasks/pending/` (commit + push), where `<id>` is
-timestamp-prefixed, e.g. `20260928-001-login-page.json`:
+timestamp-prefixed, e.g. `20260928-001-login-page.json`. **Immediately after
+pushing, wake the PC**: if `notify.json` exists in the repo root, read its
+`topic` and run
+
+```
+curl -s -d "new task <id>" "https://ntfy.sh/<topic>"
+```
+
+The extension listens on that topic and polls within ~1 second of the ping —
+no waiting for the next 30s interval. If `notify.json` doesn't exist (the
+user left `backseat.notifyTopic` empty), skip the ping; the extension's
+timer polling picks the task up within one poll interval.
 
 ```json
 {

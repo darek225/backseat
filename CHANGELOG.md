@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+- **Instant task pickup via ntfy wake-ups**: the other half of the instant
+  system. When set, `backseat.notifyTopic` now also opens an outbound listen
+  stream on the topic — no open ports, no server. The Muse side pings the
+  topic right after pushing a task file, and the extension polls within ~1
+  second instead of waiting for the next interval. Automatic reconnect with
+  backoff; if the stream ever dies, timer polling is still the fallback.
+  `notify.json` now advertises both `task_finished` and `new_task` events.
+- **Muse-side setup instructions beefed up**: `README.md` now walks through
+  creating the fine-grained PAT (exact scopes, token expiry warning) and the
+  optional ntfy phone subscription; `MUSE.md` tells the Muse to verify its
+  GitHub access, watch for token-expiry symptoms, and publish the wake-up
+  ping after every queued task.
+
 ## 0.5.0
 
 - **Instant task-finished pings via ntfy.sh** (optional): set
