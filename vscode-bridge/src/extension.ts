@@ -1422,10 +1422,6 @@ class BridgeRunner {
   }
 
   /**
-   * Setup self-check: verifies every link in the chain (repo, git auth,
-   * cline CLI, Cline extension + API) and prints a pasteable report.
-   */
-  /**
    * Run every setup check and return the report lines. No UI side effects —
    * safe to call from the sidebar dashboard.
    */
