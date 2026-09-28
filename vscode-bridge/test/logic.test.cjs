@@ -280,6 +280,16 @@ test('transcriptErrorAction: credits and auth are manual, provider errors retry'
   assert.equal(logic.transcriptErrorAction('api_req_failed: 429 rate limit, try again later'), 'retry');
 });
 
+test('isAwaitingUserAsk: user-facing asks blocked, error and say kinds allowed', () => {
+  assert.equal(logic.isAwaitingUserAsk('followup'), true);
+  assert.equal(logic.isAwaitingUserAsk('tool'), true);
+  assert.equal(logic.isAwaitingUserAsk('completion_result'), true);
+  assert.equal(logic.isAwaitingUserAsk('api_req_failed'), false);
+  assert.equal(logic.isAwaitingUserAsk('text'), false);
+  assert.equal(logic.isAwaitingUserAsk('assistant'), false);
+  assert.equal(logic.isAwaitingUserAsk(''), false);
+});
+
 test('isClaimedByDeadRunner: dead pid reclaims', () => {
   assert.equal(logic.isClaimedByDeadRunner('DESKTOP-ABC-20384-z9b5sicb', () => false), true);
   assert.equal(logic.isClaimedByDeadRunner('myhost-20384-z9b5sicb', () => true), false);

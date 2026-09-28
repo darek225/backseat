@@ -337,12 +337,32 @@ export const TRANSCRIPT_ERROR_RE =
   /api_req_failed|api[ _-]?req[ _-]?failed|rejected the request|request failed|rate.?limit|\b429\b|\b401\b|\b5\d\d\b|insufficient[ _-]?credits|quota|invalid_request/i;
 
 /**
+ * Ask kinds where Cline is waiting on the USER (approval, follow-up
+ * question, etc.) — Backseat must never auto-press those.
+ */
+const USER_AWAIT_ASKS = new Set([
+  'followup',
+  'tool',
+  'command',
+  'completion_result',
+  'mistake_limit_reached',
+  'browser_action_launch',
+  'use_mcp_server',
+  'ask_cline_question',
+  'new_task',
+  'condense',
+]);
+
+export function isAwaitingUserAsk(lastKind: string): boolean {
+  return USER_AWAIT_ASKS.has(lastKind);
+}
+
+/**
  * Decide what Backseat may do about a transcript-visible provider error.
  * Credits/quota/auth failures will fail identically on retry, so they are
  * 'manual' — surface them, never auto-press. Everything else is 'retry'.
  */
-export function transcriptErrorAction(tail: string): 'retry' | 'manual' {
-  const t = tail.toLowerCase();
+export function transcriptErrorAction(tail: string): 'retry' | 'manual' {  const t = tail.toLowerCase();
   if (
     /insufficient.*credit|out of.*credit|credits?.*(exhausted|depleted)|exceeded.*quota|quota.*exceeded|\bbilling\b|unauthorized|\b401\b|invalid[ _-]?api[ _-]?key|authentication/.test(
       t,
