@@ -77,6 +77,24 @@ Once `startNewTask()` has been called on the API path, the extension stays
 on that path for the task (falling back to the CLI as well would run the
 prompt twice).
 
+## Failure handling
+
+Cline prompts fail for flaky reasons — rate limits, network blips,
+overloaded models. The extension classifies each failure:
+
+- **Transient** (rate limit / network): retried with backoff (2 min, 10 min),
+  up to `max_retries` per task (default 2).
+- **Timeout on the CLI path**: retried like transient (the process was
+  killed, so it's safe). Never auto-retried on the API path — the task may
+  still be running in Cline's sidebar, and retrying would run it twice.
+- **Out of credits / context overflow**: failed immediately, never blindly
+  retried. Out-of-credits needs a human top-up; context overflow means Muse
+  must split the task into smaller pieces.
+
+A failed task never blocks the queue — the extension moves on to the next
+pending task, and the failure details (`error_kind`, `attempts`, `error`)
+land in the done file for Muse to triage.
+
 ## Security notes
 
 - **Auto-approve is the point — and the risk.** Both paths run Cline with
