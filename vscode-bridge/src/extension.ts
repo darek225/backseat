@@ -271,10 +271,18 @@ class BridgeRunner {
       // Self-managed clone: create it on first run, sanity-check it after.
       if (!fs.existsSync(path.join(cfg.repoPath, '.git'))) {
         if (fs.existsSync(cfg.repoPath)) {
-          vscode.window.showErrorMessage(
-            `Backseat: ${cfg.repoPath} exists but is not a git repo. Delete it or set "backseat.repoPath" explicitly.`,
-          );
-          return;
+          // Leftover from a failed clone (or the doctor's bootstrapping):
+          // the managed dir is fully owned by the extension, so clear it
+          // and start clean instead of making the user delete it by hand.
+          this.out.appendLine(`[backseat] clearing incomplete managed clone at ${cfg.repoPath}`);
+          try {
+            fs.rmSync(cfg.repoPath, { recursive: true, force: true });
+          } catch (e: any) {
+            vscode.window.showErrorMessage(
+              `Backseat: could not clear ${cfg.repoPath} (${e?.message}). Delete it manually and reload.`,
+            );
+            return;
+          }
         }
         this.out.appendLine(`[backseat] cloning bridge repo to ${cfg.repoPath} ...`);
         try {
@@ -284,10 +292,22 @@ class BridgeRunner {
         }
         const clone = await git(os.homedir(), ['clone', cfg.cloneUrl, cfg.repoPath]);
         if (clone.code !== 0 || !fs.existsSync(path.join(cfg.repoPath, '.git'))) {
-          vscode.window.showErrorMessage(
-            'Backseat: could not clone the bridge repo. Check "backseat.bridgeRepo" and your git credentials.',
-          );
           this.out.appendLine(`[backseat] clone failed: ${clone.out.slice(-500)}`);
+          // The usual cause is GitHub auth: the extension can't do the
+          // interactive sign-in, so hand the user a terminal with the exact
+          // command ready to run — the login popup works fine there.
+          const choice = await vscode.window.showErrorMessage(
+            'Backseat: could not clone the bridge repo (usually the GitHub sign-in — the extension can\'t do that part).',
+            'Run clone in terminal',
+          );
+          if (choice === 'Run clone in terminal') {
+            const term = vscode.window.createTerminal('Backseat setup');
+            term.show();
+            term.sendText(`git clone "${cfg.cloneUrl}" "${cfg.repoPath}"`, true);
+            vscode.window.showInformationMessage(
+              'Backseat: sign in to GitHub in the terminal, then reload the window (Ctrl+Shift+P → Reload Window).',
+            );
+          }
           return;
         }
         this.out.appendLine('[backseat] bridge repo cloned.');
@@ -1224,13 +1244,22 @@ class BridgeRunner {
    * cline CLI, Cline extension + API) and prints a pasteable report.
    */
   async doctor(): Promise<void> {
-    const lines: string[] = ['Backseat doctor'];
+    const ver = this.ctx.extension.packageJSON.version ?? '?';
+    const lines: string[] = [`Backseat doctor v${ver}`];
     const mark = (good: boolean, label: string, detail = '') =>
       lines.push(`${good ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
 
     const cfg = this.config;
     mark(!!cfg, 'bridge repo detected', cfg?.repoPath ?? 'set backseat.bridgeRepo to your private bridge repo (owner/repo)');
-    if (cfg) {
+    const repoOk = !!cfg && fs.existsSync(path.join(cfg.repoPath, '.git'));
+    if (cfg?.cloneUrl) {
+      mark(
+        repoOk,
+        'bridge repo cloned',
+        repoOk ? '' : 'not cloned yet — run Backseat: Start polling (or reload the window) and complete the GitHub sign-in',
+      );
+    }
+    if (cfg && repoOk) {
       for (const d of ['tasks/pending', 'tasks/active', 'tasks/done', 'tasks/status']) {
         try {
           fs.mkdirSync(path.join(cfg.repoPath, d), { recursive: true });
@@ -1451,7 +1480,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (runner.config?.autoStart) {
     void runner.start();
   } else if (!runner.config) {
-    out.appendLine('[backseat] set "backseat.repoPath" to enable polling.');
+    out.appendLine('[backseat] set "backseat.bridgeRepo" to your private bridge repo (owner/repo) to enable polling.');
   }
 
   out.appendLine('[backseat] extension activated');
