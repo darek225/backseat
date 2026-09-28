@@ -1042,6 +1042,44 @@ class BridgeRunner {
    * the task is already running inside Cline, and launching the CLI too
    * would run the prompt twice. From that point on we stay on the API path.
    */
+  /**
+   * Latest file-modification time under a directory (ms since epoch), used
+   * as a liveness signal while a Cline sidebar task runs. Skips VCS and
+   * dependency dirs, Backseat's own done-files, and caps the walk so large
+   * workspaces stay cheap.
+   */
+  private workspaceActivityMs(root: string): number {
+    let latest = 0;
+    let count = 0;
+    const skipDirs = new Set(['.git', 'node_modules', '.backseat', '.vscode']);
+    const stack: string[] = [root];
+    while (stack.length > 0 && count < 3000) {
+      const dir = stack.pop() as string;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (e.name.startsWith('.backseat-done-')) continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (!skipDirs.has(e.name)) stack.push(full);
+        } else if (e.isFile()) {
+          count++;
+          try {
+            const m = fs.statSync(full).mtimeMs;
+            if (m > latest) latest = m;
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+    return latest;
+  }
+
   private async tryRunViaClineApi(
     cfg: BridgeConfig,
     task: BridgeTask,
@@ -1107,12 +1145,35 @@ class BridgeRunner {
     const timeoutMs = (task.timeout_sec ?? cfg.defaultTimeoutSec) * 1000;
     const started = Date.now();
     let lastHeartbeat = 0;
+    // Liveness: file edits in the workspace mean Cline is progressing. If
+    // the workspace goes quiet (e.g. a provider error is sitting in the
+    // chat waiting on the retry button), press Cline's primary button once
+    // per quiet spell — that clicks retry/approve when one is showing and
+    // is a no-op otherwise.
+    const STALL_MS = 3 * 60 * 1000;
+    let lastActivity = Date.now();
+    let retryAttempted = false;
     for (;;) {
       await sleep(10_000);
       if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
         lastHeartbeat = Date.now();
         await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) working');
         await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
+      }
+      if (this.workspaceActivityMs(projectDir) > lastActivity) {
+        lastActivity = Date.now();
+        retryAttempted = false;
+      } else if (!retryAttempted && Date.now() - lastActivity > STALL_MS) {
+        retryAttempted = true;
+        this.out.appendLine(
+          `[backseat] no workspace activity for 3m on ${task.id} — pressing Cline's primary button (retry/approve).`,
+        );
+        await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) quiet — tried retry');
+        try {
+          await api.pressPrimaryButton?.();
+        } catch (e: any) {
+          this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
+        }
       }
       let content: string | null = null;
       try {
