@@ -1481,26 +1481,57 @@ class BridgeRunner {
       // ls-remote only proves READ. The whole bridge is push-based (claims,
       // statuses, results), so also prove WRITE without pushing anything:
       // `git push --dry-run` exercises push auth and dies on permission
-      // errors, but never sends objects.
-      const pushDry = await new Promise<{ code: number; out: string }>((resolve) => {
+      // errors, but never sends objects. Fetch first: a clone that is behind
+      // origin would be rejected as non-fast-forward — that's a sync issue,
+      // not an auth failure, so report it accurately instead of crying
+      // "permission denied".
+      const fetch = await new Promise<{ code: number }>((resolve) => {
         cp.execFile(
           'git',
-          ['push', '--dry-run', 'origin', 'HEAD'],
+          ['fetch', 'origin'],
           {
             cwd: cfg.repoPath,
             timeout: 20_000,
             windowsHide: true,
             env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
           },
-          (err: any, stdout: string, stderr: string) =>
-            resolve({ code: err ? 1 : 0, out: String(stdout ?? '') + String(stderr ?? '') }),
+          (err: any) => resolve({ code: err ? 1 : 0 }),
         );
       });
-      mark(
-        pushDry.code === 0,
-        'git push permission works (dry-run, pushes nothing)',
-        pushDry.code === 0 ? 'push auth OK' : pushDry.out.slice(-200).trim() || 'failed',
-      );
+      let behindNote = '';
+      if (fetch.code === 0) {
+        // rev-list is local-only: no network, no credential prompt.
+        const behind = await git(cfg.repoPath, ['rev-list', '--count', 'HEAD..@{u}']);
+        const n = parseInt(behind.out.trim(), 10);
+        if (behind.code === 0 && n > 0) {
+          behindNote =
+            `clone is ${n} commit(s) behind origin — hit Check now to sync, ` +
+            `then re-run the doctor`;
+        }
+      }
+      if (behindNote) {
+        mark(false, 'git push permission works (dry-run, pushes nothing)', behindNote);
+      } else {
+        const pushDry = await new Promise<{ code: number; out: string }>((resolve) => {
+          cp.execFile(
+            'git',
+            ['push', '--dry-run', 'origin', 'HEAD'],
+            {
+              cwd: cfg.repoPath,
+              timeout: 20_000,
+              windowsHide: true,
+              env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+            },
+            (err: any, stdout: string, stderr: string) =>
+              resolve({ code: err ? 1 : 0, out: String(stdout ?? '') + String(stderr ?? '') }),
+          );
+        });
+        mark(
+          pushDry.code === 0,
+          'git push permission works (dry-run, pushes nothing)',
+          pushDry.code === 0 ? 'push auth OK' : pushDry.out.slice(-200).trim() || 'failed',
+        );
+      }
 
       const clineCmd = cfg.clineCommand || 'cline';
       const clinev = await new Promise<{ code: number; out: string }>((resolve) => {

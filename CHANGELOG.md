@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+- **Doctor push check**: `git push --dry-run` used to report a behind-origin
+  clone as a permission failure ("fetch first…"). The doctor now fetches
+  first and says plainly when the clone is behind, pointing at Check now to
+  sync before re-running.
+
 ## 0.7.1
 
 - **Seamless Muse-side setup**: the docs no longer ask new users to hand-craft
