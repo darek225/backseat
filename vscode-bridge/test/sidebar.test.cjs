@@ -58,3 +58,12 @@ test('dashboard: backend interface methods exist on provider wiring', () => {
     assert.ok(src.includes(`backend.${m}`), `provider never calls backend.${m}`);
   }
 });
+
+test('doctor: push check fetches before dry-run and reports behind-origin accurately', () => {
+  const ext = fs.readFileSync(path.join(__dirname, '..', 'out', 'extension.js'), 'utf8');
+  const fetchIdx = ext.indexOf("'fetch', 'origin'");
+  const dryIdx = ext.indexOf("'push', '--dry-run'");
+  assert.ok(fetchIdx !== -1 && dryIdx !== -1 && fetchIdx < dryIdx, 'doctor must fetch before the push dry-run');
+  assert.ok(ext.includes('behind origin'), 'doctor must name the behind-origin case');
+  assert.ok(ext.includes('Check now to sync'), 'doctor must point at the Check-now remedy');
+});
