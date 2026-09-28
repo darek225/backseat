@@ -278,19 +278,28 @@ export function bridgeRepoUrl(repo: string): string | undefined {
  * Handles BOTH shapes: ClineMessage ({type:'say'|'ask', say/ask, text} —
  * this is what the SDK persists, including ask:'api_req_failed' error
  * payloads) and Anthropic-style ({role, content:[...]}).
+ *
+ * Also reports the kind of the LAST chunk (e.g. 'api_req_failed',
+ * 'followup', 'text', 'assistant') so callers can tell whether Cline is
+ * showing a provider error, waiting on user input, or mid-stream.
  */
-export function transcriptText(messagesPath: string, maxChars: number): string {
+export interface TranscriptInfo {
+  text: string;
+  lastKind: string;
+}
+
+export function transcriptInfo(messagesPath: string, maxChars: number): TranscriptInfo {
   try {
     const raw = fs.readFileSync(messagesPath, 'utf8');
     const parsed = JSON.parse(raw);
     const messages = Array.isArray(parsed) ? parsed : (parsed as any)?.messages;
-    if (!Array.isArray(messages) || messages.length === 0) return '';
-    const chunks: string[] = [];
+    if (!Array.isArray(messages) || messages.length === 0) return { text: '', lastKind: '' };
+    const chunks: { kind: string; text: string }[] = [];
     for (const m of messages.slice(-8)) {
       const anyM = m as any;
       if (typeof anyM?.text === 'string' && anyM.text.trim()) {
         const kind = anyM?.say || anyM?.ask || anyM?.type || 'msg';
-        chunks.push(`${kind}: ${anyM.text.trim()}`.slice(0, 1200));
+        chunks.push({ kind, text: `${kind}: ${anyM.text.trim()}`.slice(0, 1200) });
         continue;
       }
       const role = typeof anyM?.role === 'string' ? anyM.role : '';
@@ -302,16 +311,22 @@ export function transcriptText(messagesPath: string, maxChars: number): string {
           : [];
       for (const b of blocks) {
         if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-          chunks.push(`${role}: ${b.text.trim()}`.slice(0, 1200));
+          chunks.push({ kind: role || 'msg', text: `${role}: ${b.text.trim()}`.slice(0, 1200) });
         } else if (b && b.type === 'tool_use' && typeof b.name === 'string') {
-          chunks.push(`${role} using tool: ${b.name}`);
+          chunks.push({ kind: role || 'msg', text: `${role} using tool: ${b.name}` });
         }
       }
     }
-    return chunks.join('\n').slice(-maxChars);
+    const lastKind = chunks.length ? chunks[chunks.length - 1].kind : '';
+    return { text: chunks.map((c) => c.text).join('\n').slice(-maxChars), lastKind };
   } catch {
-    return '';
+    return { text: '', lastKind: '' };
   }
+}
+
+/** Backwards-compatible text-only wrapper. */
+export function transcriptText(messagesPath: string, maxChars: number): string {
+  return transcriptInfo(messagesPath, maxChars).text;
 }
 
 /**
@@ -320,6 +335,94 @@ export function transcriptText(messagesPath: string, maxChars: number): string {
  */
 export const TRANSCRIPT_ERROR_RE =
   /api_req_failed|api[ _-]?req[ _-]?failed|rejected the request|request failed|rate.?limit|\b429\b|\b401\b|\b5\d\d\b|insufficient[ _-]?credits|quota|invalid_request/i;
+
+/**
+ * Decide what Backseat may do about a transcript-visible provider error.
+ * Credits/quota/auth failures will fail identically on retry, so they are
+ * 'manual' — surface them, never auto-press. Everything else is 'retry'.
+ */
+export function transcriptErrorAction(tail: string): 'retry' | 'manual' {
+  const t = tail.toLowerCase();
+  if (
+    /insufficient.*credit|out of.*credit|credits?.*(exhausted|depleted)|exceeded.*quota|quota.*exceeded|\bbilling\b|unauthorized|\b401\b|invalid[ _-]?api[ _-]?key|authentication/.test(
+      t,
+    )
+  ) {
+    return 'manual';
+  }
+  return 'retry';
+}
+
+/**
+ * Find a Cline session by scanning session message files for a marker.
+ *
+ * WHY: tasks started via the extension API (`startNewTask`) create the
+ * session with prompt:undefined — the row in sessions.index.json ends up
+ * with prompt:null, so a marker search on the index can never match.
+ * The full prompt (with our marker) only survives in the first user
+ * message of the session's `<sessionId>.messages.json`.
+ *
+ * Scans session dirs newest-first, reads only the first 8KB of each
+ * messages file (the marker is in the first user message), and stops at
+ * the first match. Returns the session id and messages path.
+ */
+export function findSessionIdByMarker(
+  sessionsDir: string,
+  marker: string,
+  maxDirs = 60,
+): { sessionId: string; messagesPath: string } | null {
+  let entries: any[];
+  try {
+    entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const dirs: { name: string; mtime: number }[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    try {
+      dirs.push({
+        name: e.name,
+        mtime: fs.statSync(path.join(sessionsDir, e.name)).mtimeMs,
+      });
+    } catch {
+      /* unreadable — skip */
+    }
+  }
+  dirs.sort((a, b) => b.mtime - a.mtime);
+  for (const d of dirs.slice(0, maxDirs)) {
+    const candidates = [path.join(sessionsDir, d.name, `${d.name}.messages.json`)];
+    // Fall back to any *.messages.json in the dir (layout drift).
+    try {
+      for (const f of fs.readdirSync(path.join(sessionsDir, d.name))) {
+        if (f.endsWith('.messages.json') && f !== `${d.name}.messages.json`) {
+          candidates.push(path.join(sessionsDir, d.name, f));
+        }
+      }
+    } catch {
+      continue;
+    }
+    for (const mp of candidates) {
+      let head = '';
+      try {
+        const fd = fs.openSync(mp, 'r');
+        try {
+          const buf = Buffer.alloc(8192);
+          const n = fs.readSync(fd, buf, 0, 8192, 0);
+          head = buf.subarray(0, n).toString('utf8');
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        continue;
+      }
+      if (head.includes(marker)) {
+        return { sessionId: d.name, messagesPath: mp };
+      }
+    }
+  }
+  return null;
+}
 
 /**
  * Decide whether a task's claim belongs to a dead runner.

@@ -187,6 +187,99 @@ test('transcriptText: missing file returns empty string', () => {
   assert.equal(logic.transcriptText('/nonexistent/messages.json', 1000), '');
 });
 
+test('transcriptInfo: lastKind is api_req_failed for error transcript', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  const messages = [
+    { ts: 1, type: 'say', say: 'text', text: 'I will add the placement rules now.' },
+    { ts: 2, type: 'ask', ask: 'api_req_failed', text: 'provider rejected the request: invalid request' },
+  ];
+  fs.writeFileSync(p, JSON.stringify(messages));
+  const info = logic.transcriptInfo(p, 4000);
+  assert.equal(info.lastKind, 'api_req_failed');
+  assert.ok(info.text.includes('provider rejected the request'));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptInfo: lastKind follows a followup ask (awaiting user)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  const messages = [
+    { ts: 1, type: 'say', say: 'text', text: 'Working.' },
+    { ts: 2, type: 'ask', ask: 'followup', text: 'Should I continue with the scoring system?' },
+  ];
+  fs.writeFileSync(p, JSON.stringify(messages));
+  const info = logic.transcriptInfo(p, 4000);
+  assert.equal(info.lastKind, 'followup');
+  assert.ok(!logic.TRANSCRIPT_ERROR_RE.test(info.text), 'no false positive on followup');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptInfo: Anthropic shape lastKind is the role', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  const messages = [{ role: 'assistant', content: [{ type: 'text', text: 'Working on it' }] }];
+  fs.writeFileSync(p, JSON.stringify(messages));
+  const info = logic.transcriptInfo(p, 4000);
+  assert.equal(info.lastKind, 'assistant');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('findSessionIdByMarker: finds newest session with marker in messages head', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const mkSession = (name, firstUserText, mtimeOffsetMs) => {
+    const sd = path.join(dir, name);
+    fs.mkdirSync(sd);
+    fs.writeFileSync(
+      path.join(sd, `${name}.messages.json`),
+      JSON.stringify([{ ts: 1, type: 'say', say: 'text', text: firstUserText }]),
+    );
+    const t = new Date(Date.now() - mtimeOffsetMs);
+    fs.utimesSync(sd, t, t);
+  };
+  mkSession('sess-old', '[backseat:task:20260928-blokus-2-rules]\nDo the rules.', 600_000);
+  mkSession('sess-new', '[backseat:task:20260928-blokus-2-rules]\nDo the rules (retry).', 60_000);
+  mkSession('sess-other', 'Just chatting about the weather.', 10_000);
+  const found = logic.findSessionIdByMarker(dir, '[backseat:task:20260928-blokus-2-rules]');
+  assert.ok(found, 'marker session found');
+  assert.equal(found.sessionId, 'sess-new', 'newest match wins');
+  assert.ok(found.messagesPath.endsWith('sess-new.messages.json'));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('findSessionIdByMarker: null when nothing matches', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const sd = path.join(dir, 'sess-1');
+  fs.mkdirSync(sd);
+  fs.writeFileSync(
+    path.join(sd, 'sess-1.messages.json'),
+    JSON.stringify([{ ts: 1, type: 'say', say: 'text', text: 'hello' }]),
+  );
+  assert.equal(logic.findSessionIdByMarker(dir, '[backseat:task:nope]'), null);
+  assert.equal(logic.findSessionIdByMarker(path.join(dir, 'missing'), '[backseat:task:nope]'), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('findSessionIdByMarker: marker past the 8KB head is not found', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const sd = path.join(dir, 'sess-big');
+  fs.mkdirSync(sd);
+  const padding = 'x'.repeat(9000);
+  fs.writeFileSync(
+    path.join(sd, 'sess-big.messages.json'),
+    JSON.stringify([{ ts: 1, type: 'say', say: 'text', text: padding + '[backseat:task:late]' }]),
+  );
+  assert.equal(logic.findSessionIdByMarker(dir, '[backseat:task:late]'), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptErrorAction: credits and auth are manual, provider errors retry', () => {
+  assert.equal(logic.transcriptErrorAction('api_req_failed: insufficient credits, please top up'), 'manual');
+  assert.equal(logic.transcriptErrorAction('api_req_failed: 401 unauthorized, invalid api key'), 'manual');
+  assert.equal(logic.transcriptErrorAction('api_req_failed: provider rejected the request: invalid request'), 'retry');
+  assert.equal(logic.transcriptErrorAction('api_req_failed: 429 rate limit, try again later'), 'retry');
+});
+
 test('isClaimedByDeadRunner: dead pid reclaims', () => {
   assert.equal(logic.isClaimedByDeadRunner('DESKTOP-ABC-20384-z9b5sicb', () => false), true);
   assert.equal(logic.isClaimedByDeadRunner('myhost-20384-z9b5sicb', () => true), false);

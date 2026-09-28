@@ -39,7 +39,10 @@ import {
   tailLines,
   utcnow,
   transcriptText,
+  transcriptInfo,
   TRANSCRIPT_ERROR_RE,
+  transcriptErrorAction,
+  findSessionIdByMarker,
   isClaimedByDeadRunner,
 } from './logic';
 import {
@@ -1086,7 +1089,14 @@ class BridgeRunner {
     return {};
   }
 
-  /** Newest session whose prompt contains our task marker. */
+  /**
+   * Newest session belonging to a task. Two strategies:
+   * 1. sessions.index.json prompt marker (CLI-created sessions pass the
+   *    prompt at creation, so the row has it).
+   * 2. Scan of session message files (extension-API tasks create the
+   *    session with prompt:undefined, so the index row's prompt is null —
+   *    the marker only survives in the first user message).
+   */
   private findBackseatSession(taskId: string): { sessionId: string; row: any } | null {
     const marker = `[backseat:task:${taskId}]`;
     const sessions = this.readSessionsIndex();
@@ -1101,7 +1111,15 @@ class BridgeRunner {
         bestStart = startedAt;
       }
     }
-    return best;
+    if (best) return best;
+    const scanned = findSessionIdByMarker(this.clineSessionsDir(), marker);
+    if (scanned) {
+      this.out.appendLine(
+        `[backseat] found session ${scanned.sessionId} for ${taskId} via message-file scan (index row has no prompt).`,
+      );
+      return { sessionId: scanned.sessionId, row: { messagesPath: scanned.messagesPath } };
+    }
+    return null;
   }
 
   /** Read one session row straight from the index (works for any session). */
@@ -1295,7 +1313,15 @@ class BridgeRunner {
       /* ignore */
     }
     const row = this.readSessionRow(sessionId);
-    const messagesPath = typeof row?.messagesPath === 'string' ? row.messagesPath : undefined;
+    let messagesPath = typeof row?.messagesPath === 'string' ? row.messagesPath : undefined;
+    if (!messagesPath) {
+      // Extension-API sessions may have no index row (or a row without
+      // messagesPath) — the artifacts path is conventional.
+      const conventional = path.join(this.clineSessionsDir(), sessionId, `${sessionId}.messages.json`);
+      if (fs.existsSync(conventional)) {
+        messagesPath = conventional;
+      }
+    }
     this.out.appendLine(`[backseat] resuming Cline session ${sessionId} for ${task.id} (context kept)`);
     await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) resumed');
     await pushChanges(cfg.repoPath, `task ${task.id}: resumed`, this.out);
@@ -1349,17 +1375,25 @@ class BridgeRunner {
     const started = Date.now();
     let lastHeartbeat = 0;
     // Liveness comes from the live transcript: new messages mean Cline is
-    // progressing. If the transcript goes quiet while the session is still
-    // running (e.g. a provider error waiting on the retry button), press
-    // Cline's primary button once per quiet spell — that clicks
-    // retry/approve when one is showing and is a no-op otherwise.
+    // progressing. When the transcript goes quiet:
+    // - if the LAST transcript message is ask:'api_req_failed' (a provider
+    //   error waiting on the retry button), press Cline's primary button —
+    //   up to 3 times per quiet spell, and never for credits/auth errors
+    //   (those need a human: top-up or key fix).
+    // - on a generic 3-minute stall with NO error showing, press once — but
+    //   never when Cline is asking the user something (an approval or
+    //   follow-up question must not be auto-answered).
     const STALL_MS = 3 * 60 * 1000;
     const ERROR_RETRY_MS = 60_000;
+    const MAX_ERROR_RETRIES = 3;
     const ERROR_RE = TRANSCRIPT_ERROR_RE;
     let lastMsgMtime = messagesPath ? this.messagesMtimeMs(messagesPath) : Date.now();
     let lastMsgCount = 0;
     let retryAttempted = false;
     let errorRetryAttempted = false;
+    let errorRetryBlocked = false;
+    let consecutiveErrorRetries = 0;
+    let stallAwaitingNoted = false;
     for (;;) {
       await sleep(10_000);
       if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
@@ -1385,6 +1419,7 @@ class BridgeRunner {
       // 2. Session-store signals.
       let status: string | undefined;
       let transcriptTail = '';
+      let transcriptLastKind = '';
       if (sessionId) {
         const row = this.readSessionRow(sessionId);
         if (row) {
@@ -1400,8 +1435,13 @@ class BridgeRunner {
             lastMsgCount++;
             retryAttempted = false;
             errorRetryAttempted = false;
+            errorRetryBlocked = false;
+            consecutiveErrorRetries = 0;
+            stallAwaitingNoted = false;
           }
-          transcriptTail = this.transcriptText(messagesPath, 1500);
+          const info = transcriptInfo(messagesPath, 1500);
+          transcriptTail = info.text;
+          transcriptLastKind = info.lastKind;
         }
       }
 
@@ -1415,36 +1455,98 @@ class BridgeRunner {
         return { result: ok ? 'success' : 'failed', output: output.slice(0, 8000), exitCode: ok ? 0 : 1 };
       }
 
-      // 2b. Error visible in the transcript + quiet spell -> retry fast.
+      // 2b. Provider error is the LATEST transcript state + quiet spell ->
+      // press Cline's primary button (Resume/Retry). Only when the newest
+      // message really is the error — never blind-fire on a stale error
+      // tail while Cline waits on the user for something else.
       const quietMs = Date.now() - lastMsgMtime;
       if (
         sessionId &&
         !errorRetryAttempted &&
+        !errorRetryBlocked &&
         quietMs > ERROR_RETRY_MS &&
+        transcriptLastKind === 'api_req_failed' &&
         transcriptTail &&
         ERROR_RE.test(transcriptTail)
       ) {
         errorRetryAttempted = true;
-        this.out.appendLine(
-          `[backseat] transcript shows an error and Cline is quiet — pressing primary button (retry).`,
-        );
-        await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) error seen — retried');
-        try {
-          await api.pressPrimaryButton?.();
-        } catch (e: any) {
-          this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
+        if (transcriptErrorAction(transcriptTail) === 'manual') {
+          // Credits/quota/auth: retrying fails identically — surface it.
+          errorRetryBlocked = true;
+          this.out.appendLine(
+            `[backseat] transcript shows a credits/auth error on ${task.id} — needs manual action, not auto-pressing.`,
+          );
+          await this.writeStatus(
+            cfg,
+            task.id,
+            'running',
+            '',
+            'cline (sidebar) credits/auth issue — manual action needed',
+          );
+        } else if (consecutiveErrorRetries >= MAX_ERROR_RETRIES) {
+          errorRetryBlocked = true;
+          this.out.appendLine(
+            `[backseat] ${task.id}: provider still failing after ${MAX_ERROR_RETRIES} auto-retries — manual attention needed.`,
+          );
+          await this.writeStatus(
+            cfg,
+            task.id,
+            'running',
+            '',
+            `cline (sidebar) error persists after ${MAX_ERROR_RETRIES} auto-retries — manual attention needed`,
+          );
+        } else {
+          consecutiveErrorRetries++;
+          this.out.appendLine(
+            `[backseat] transcript shows a provider error and Cline is quiet — pressing primary button (retry ${consecutiveErrorRetries}/${MAX_ERROR_RETRIES}).`,
+          );
+          await this.writeStatus(
+            cfg,
+            task.id,
+            'running',
+            '',
+            `cline (sidebar) error seen — retried (${consecutiveErrorRetries}/${MAX_ERROR_RETRIES})`,
+          );
+          try {
+            await api.pressPrimaryButton?.();
+          } catch (e: any) {
+            this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
+          }
         }
-      } else if (sessionId && !retryAttempted && quietMs > STALL_MS) {
-        // 2c. Generic stall (no transcript movement at all) -> retry once.
-        retryAttempted = true;
-        this.out.appendLine(
-          `[backseat] no transcript activity for 3m on ${task.id} — pressing Cline's primary button (retry/approve).`,
-        );
-        await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) quiet — tried retry');
-        try {
-          await api.pressPrimaryButton?.();
-        } catch (e: any) {
-          this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
+      } else if (
+        sessionId &&
+        !retryAttempted &&
+        quietMs > STALL_MS &&
+        transcriptLastKind !== 'api_req_failed'
+      ) {
+        // 2c. Generic stall (no transcript movement at all) -> press once,
+        // but never when Cline is asking the user something — an approval
+        // or follow-up must not be auto-answered.
+        if (transcriptLastKind.startsWith('ask')) {
+          if (!stallAwaitingNoted) {
+            stallAwaitingNoted = true;
+            this.out.appendLine(
+              `[backseat] ${task.id}: Cline is awaiting user input ('${transcriptLastKind}') — not pressing.`,
+            );
+            await this.writeStatus(
+              cfg,
+              task.id,
+              'running',
+              '',
+              `cline (sidebar) awaiting your input (${transcriptLastKind})`,
+            );
+          }
+        } else {
+          retryAttempted = true;
+          this.out.appendLine(
+            `[backseat] no transcript activity for 3m on ${task.id} — pressing Cline's primary button (retry/approve).`,
+          );
+          await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) quiet — tried retry');
+          try {
+            await api.pressPrimaryButton?.();
+          } catch (e: any) {
+            this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
+          }
         }
       }
       if (Date.now() - started >= timeoutMs) {
