@@ -51,12 +51,19 @@ No open ports. No shared API keys. GitHub is the only wire.
      the user to rotate the token — don't keep queueing into a dead bridge.
      (The device-flow login above doesn't have this problem.)
 3. **Read `protocol.md`** — the exact JSON schemas for task files and status files.
-3. **Set up a recurring check** (cron): every few minutes, `git pull` the
-   bridge repo and summarize `tasks/pending/`, `tasks/active/`,
-   `tasks/done/` and `tasks/status/`. Report anything new to the user in
-   chat. Timing is polling, not instant: tell the user that asking "status"
+3. **Install muse-watch, then set up the recurring check.** `muse-watch/` is the
+   Muse-side watcher: run `./muse-watch/install.sh <owner/repo>` on your Linux
+   host. It keeps a read-only mirror of the bridge repo and maintains
+   `~/.backseat/muse-watch/<slug>/state.json` — every task's queue (`pending`/
+   `active`/`done`), state, progress note, and heartbeat, rewritten only when
+   something changes, plus an `events.log` transition log. Your recurring
+   check (cron, every few minutes) then reads that one small file instead of
+   `git pull`-ing and parsing JSON yourself: report anything new to the user
+   in chat. Timing is polling, not instant: tell the user that asking "status"
    in chat is the fast path. The extension creates the task directories
-   itself on first run, so an empty bridge repo is fine.
+   itself on first run, so an empty bridge repo is fine. Keep using your
+   normal working clone for queueing tasks (commits/pushes) — the watcher's
+   mirror is read-only; never point task-writing work at it.
    - **Fast path (if `notify.json` exists):** the user enabled instant
      pings. Read `topic` from `notify.json` and poll
      `https://ntfy.sh/<topic>/json?since=<last-seen-id>` — each new ping
