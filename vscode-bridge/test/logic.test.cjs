@@ -126,3 +126,27 @@ test('bridgeRepoUrl: shorthand, URLs, rejects junk', () => {
   assert.equal(logic.bridgeRepoUrl('not a repo!!!'), undefined);
   assert.equal(logic.bridgeRepoUrl('a/b/c'), undefined);
 });
+
+test('clineSpawnTarget: win32 routes through cmd.exe with prompt as ONE argv element', () => {
+  const t = logic.clineSpawnTarget('cline', 'Create a file named hello.txt', 'win32');
+  assert.equal(t.file, 'cmd.exe');
+  assert.equal(t.shell, false);
+  assert.deepEqual(t.args.slice(0, 4), ['/d', '/s', '/c', 'cline']);
+  assert.equal(t.args[4], '--yolo');
+  assert.equal(t.args[5], 'Create a file named hello.txt', 'prompt must stay a single argv element');
+});
+
+test('clineSpawnTarget: win32 keeps special chars inside the single prompt arg', () => {
+  const prompt = 'Write "hi" & done — 100% sure!';
+  const t = logic.clineSpawnTarget('cline', prompt, 'win32');
+  assert.equal(t.args[5], prompt);
+});
+
+test('clineSpawnTarget: posix spawns the CLI directly, no shell', () => {
+  for (const plat of ['linux', 'darwin']) {
+    const t = logic.clineSpawnTarget('cline', 'do the thing', plat);
+    assert.equal(t.file, 'cline');
+    assert.deepEqual(t.args, ['--yolo', 'do the thing']);
+    assert.equal(t.shell, false);
+  }
+});

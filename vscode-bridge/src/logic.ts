@@ -12,6 +12,31 @@ import * as path from 'path';
 
 export type TaskState = 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'timeout';
 
+/**
+ * How to spawn the Cline CLI for a task run.
+ *
+ * On Windows the CLI is an npm `.cmd` shim, which needs cmd.exe — but
+ * `shell: true` makes Node join file+args with plain spaces, so a
+ * multi-word prompt arrives as separate argv entries and the CLI rejects
+ * it ("Unknown command or unquoted prompt"). Routing through
+ * `cmd.exe /d /s /c` with `shell: false` lets libuv quote each argv
+ * element correctly instead.
+ */
+export function clineSpawnTarget(
+  clineCommand: string,
+  prompt: string,
+  platform: string = process.platform,
+): { file: string; args: string[]; shell: boolean } {
+  if (platform === 'win32') {
+    return {
+      file: 'cmd.exe',
+      args: ['/d', '/s', '/c', clineCommand, '--yolo', prompt],
+      shell: false,
+    };
+  }
+  return { file: clineCommand, args: ['--yolo', prompt], shell: false };
+}
+
 /** How a Cline run failed — drives retry policy. */
 export type ErrorKind = 'transient' | 'no_credits' | 'context_overflow' | 'timeout' | 'failed';
 

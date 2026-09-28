@@ -29,6 +29,7 @@ import {
   TaskState,
   bridgeRepoUrl,
   classifyError,
+  clineSpawnTarget,
   completionMarker,
   deleteProtectionReason,
   idOf,
@@ -1164,10 +1165,12 @@ class BridgeRunner {
 
       let child: cp.ChildProcess;
       try {
-        child = cp.spawn(cfg.clineCommand, ['--yolo', prompt], {
+        // Spawn target is a pure function (logic.ts) so the Windows
+        // cmd.exe/argv quoting is unit-testable — see clineSpawnTarget.
+        const target = clineSpawnTarget(cfg.clineCommand, prompt);
+        child = cp.spawn(target.file, target.args, {
           cwd: projectDir,
-          // npm-installed CLIs are .cmd shims on Windows — need a shell there.
-          shell: process.platform === 'win32',
+          shell: target.shell,
           windowsHide: true,
         });
       } catch (e: any) {
