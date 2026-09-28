@@ -61,6 +61,25 @@ Rules:
   let run unsupervised, pointed at project directories — never system paths.
 - To cancel: move the pending file to `tasks/done/` with `"result": "cancelled"`.
 
+## Project directory map
+
+The user drives everything from their phone, including switching projects —
+so you must know which nickname maps to which PC path. Keep a `projects.json`
+in the user's private repo copy:
+
+```json
+{
+  "blog": "C:\\Users\\Darek\\code\\blog",
+  "portfolio": "C:\\Users\\Darek\\code\\portfolio"
+}
+```
+
+When the user mentions a project you don't know, ask for its full PC path
+once, add it to `projects.json` (commit + push), and remember it. Every
+task's `project_dir` comes from this map — never guess a path. The extension
+hands `project_dir` to Cline, so the user never has to touch VS Code to switch
+projects.
+
 ## Reporting back
 
 When a task lands in `tasks/done/`, read its `result` and the final
