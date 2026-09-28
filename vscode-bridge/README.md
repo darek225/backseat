@@ -1,4 +1,4 @@
-# Muse ↔ Cline Bridge — VS Code extension (PC side)
+# Backseat — VS Code extension (PC side)
 
 This is the PC side of the bridge, as a VS Code extension. While VS Code is
 open it polls the private bridge GitHub repo for pending architect tasks from
@@ -28,21 +28,22 @@ Then either:
 
 ## Configure
 
-Set these in VS Code settings (search "Muse Bridge"):
+Open the bridge repo folder in VS Code and you're done — Backseat
+auto-detects it. Or set these in VS Code settings (search "Backseat"):
 
 | Setting | What it does |
 |---|---|
-| `museBridge.repoPath` | Local clone of the bridge repo, e.g. `C:\Users\Darek\muse-cline-bridge`. Empty = bridge disabled. |
-| `museBridge.pollIntervalSec` | How often to pull and look for tasks (default 30). |
-| `museBridge.autoStart` | Start polling on VS Code launch (default true). |
-| `museBridge.clineCommand` | Cline CLI command for the fallback path (default `cline`; full path if needed). |
-| `museBridge.preferClineApi` | Try Cline's extension API first (default true). |
-| `museBridge.defaultTimeoutSec` | Kill a task after this long (default 1800). |
+| `backseat.repoPath` | Local clone of the bridge repo. Empty = auto-detect from the open folder. |
+| `backseat.pollIntervalSec` | How often to pull and look for tasks (default 30). |
+| `backseat.autoStart` | Start polling on VS Code launch (default true). |
+| `backseat.clineCommand` | Cline CLI command for the fallback path (default `cline`; full path if needed). |
+| `backseat.preferClineApi` | Try Cline's extension API first (default true). |
+| `backseat.defaultTimeoutSec` | Kill a task after this long (default 1800). |
 
-Commands (Ctrl+Shift+P): **Muse Bridge: Start polling / Stop polling /
+Commands (Ctrl+Shift+P): **Backseat: Start polling / Stop polling /
 Check for tasks now / Show status**. A status-bar item and an Explorer view
-("Muse Bridge Tasks") show pending/active/done tasks; output goes to the
-"Muse Bridge" channel.
+("Backseat Tasks") show pending/active/done tasks; output goes to the
+"Backseat" channel.
 
 ## How it drives Cline
 
