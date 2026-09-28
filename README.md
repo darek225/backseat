@@ -39,11 +39,10 @@ Then tell your Muse two things:
 
 **Instant pings (optional, recommended).** In VS Code settings, set
 `backseat.notifyTopic` to any unguessable string (e.g. `backseat-9f3k7q2x`).
-Two things get faster: your Muse's ping wakes the PC in ~1 second when you
-queue a task (instead of waiting for the next 30-second poll), and the PC
-pings back the moment a task finishes. Install the free **ntfy** app on your
-phone, subscribe to that topic, and completions buzz your pocket — no account
-needed.
+This is machine-to-machine signaling only — no app, no account, nothing for
+you to install. With it set, your Muse's ping wakes the PC in ~1 second when
+you queue a task (instead of waiting for the next 30-second poll), and the
+PC pings back the moment a task finishes so your Muse hears about it sooner.
 
 **3. Install the VS Code plugin.**
 Download [`dist/backseat-latest.vsix`](dist/backseat-latest.vsix), then in
