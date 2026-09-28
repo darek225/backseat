@@ -1032,7 +1032,10 @@ class BridgeRunner {
   // -- Cline extension API path -------------------------------------------
 
   /**
-   * Drive the Cline VS Code extension through its programmatic API.
+   * Drive the Cline sidebar through its programmatic API (the primary path:
+   * the task runs visibly in the user's chat, at chat speed, with the
+   * user's own settings). Completion is a file handshake — the prompt
+   * instructs Cline to write `.backseat-done-<taskid>` when fully done.
    * Returns null when the API surface is not usable (caller falls back to CLI).
    *
    * IMPORTANT: once startNewTask() has been invoked we must NOT fall back —
@@ -1062,14 +1065,90 @@ class BridgeRunner {
       );
       return null;
     }
-    // The verified Cline 4.x API (startNewTask/sendMessage/pressPrimaryButton/
-    // pressSecondaryButton) has no task-history getter and no completion
-    // signal, so we cannot reliably finish a bridge task through it. The CLI
-    // fallback shares the extension's provider settings
-    // (~/.cline/data/settings/providers.json), so it runs the user's own
-    // setup with no extra configuration.
-    this.out.appendLine('[backseat] Cline API has no completion signal; using CLI (shared provider settings).');
-    return null;
+    // Drive the Cline sidebar directly: the task runs visibly in the
+    // user's chat, at chat speed, with the user's own settings. The
+    // verified Cline 4.x API has no completion signal, so completion is a
+    // handshake: the prompt instructs Cline to write a sentinel file when
+    // fully done, and we poll the workspace for it.
+    const projectDir =
+      task.project_dir ||
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
+      cfg.repoPath;
+    if (!fs.existsSync(projectDir)) {
+      this.out.appendLine(`[backseat] Cline API path: project_dir does not exist: ${projectDir}`);
+      return null;
+    }
+    const sentinelName = `.backseat-done-${task.id}`;
+    const sentinelPath = path.join(projectDir, sentinelName);
+    try {
+      fs.unlinkSync(sentinelPath);
+    } catch {
+      /* no stale sentinel */
+    }
+
+    const fullPrompt =
+      `${prompt}\n\n---\n` +
+      `When you have FULLY completed everything above, write a file named ${sentinelName} ` +
+      `in the current workspace root (${projectDir}). The first line of the file must be exactly ` +
+      `DONE if you succeeded or FAILED if you could not complete the work. After that line, write a ` +
+      `short summary of what you did or changed (file paths and key decisions). ` +
+      `Do not write this file until you are completely finished. Do not stop early.`;
+
+    this.out.appendLine(`[backseat] starting Cline sidebar task: ${task.id}`);
+    await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) working');
+    await pushChanges(cfg.repoPath, `task ${task.id}: running`, this.out);
+
+    try {
+      await api.startNewTask(fullPrompt);
+    } catch (e: any) {
+      return { result: 'failed', output: `startNewTask threw: ${e?.message ?? e}`, exitCode: 1 };
+    }
+
+    const timeoutMs = (task.timeout_sec ?? cfg.defaultTimeoutSec) * 1000;
+    const started = Date.now();
+    let lastHeartbeat = 0;
+    for (;;) {
+      await sleep(10_000);
+      if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
+        lastHeartbeat = Date.now();
+        await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) working');
+        await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
+      }
+      let content: string | null = null;
+      try {
+        if (fs.existsSync(sentinelPath)) {
+          content = fs.readFileSync(sentinelPath, 'utf8');
+        }
+      } catch {
+        content = null;
+      }
+      if (content !== null) {
+        // Remove the sentinel immediately so a heartbeat push can never
+        // sweep it into the bridge repo, and a retry starts clean.
+        try {
+          fs.unlinkSync(sentinelPath);
+        } catch {
+          /* already gone */
+        }
+        const firstLine = content.split('\n')[0].trim().toUpperCase();
+        const ok = firstLine === 'DONE';
+        this.out.appendLine(`[backseat] Cline sidebar task ${task.id} finished: ${firstLine || '(empty)'}`);
+        return {
+          result: ok ? 'success' : 'failed',
+          output: content.slice(0, 8000),
+          exitCode: ok ? 0 : 1,
+        };
+      }
+      if (Date.now() - started >= timeoutMs) {
+        return {
+          result: 'timeout',
+          output:
+            'Timed out waiting for the Cline sidebar task to write its done-file. ' +
+            'Cline may still be working — check the sidebar.',
+          exitCode: 124,
+        };
+      }
+    }
   }
 
   // -- Cline CLI fallback path ---------------------------------------------
@@ -1534,10 +1613,10 @@ class BridgeRunner {
       try {
         const api = (await ext.activate()) as ClineApi;
         mark(typeof api?.startNewTask === 'function', 'Cline API: startNewTask');
-        // Verified: the Cline 4.x extension API has no completion signal, so
-        // Backseat always uses the CLI path (which shares the extension's
-        // provider settings — no extra configuration needed).
-        mark(true, 'Cline API: completion signal', 'none by design — CLI fallback is the intended path');
+        // The sidebar path is primary: tasks run visibly in the Cline chat
+        // and completion is a done-file handshake (no completion signal in
+        // the API itself). CLI remains as fallback.
+        mark(true, 'Cline API: task path', 'sidebar chat via startNewTask + done-file handshake');
       } catch (e: any) {
         mark(false, 'Cline extension activates', e?.message ?? String(e));
       }

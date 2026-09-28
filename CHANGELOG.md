@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+- **Cline sidebar is now the primary task path**: tasks start visibly in the
+  user's Cline chat via the extension API (`startNewTask`) — chat speed,
+  user's own settings, and you can watch it work. Completion is a file
+  handshake: the prompt instructs Cline to write `.backseat-done-<taskid>`
+  (first line DONE or FAILED plus a summary) in the workspace root, which
+  Backseat polls for. The headless CLI remains as automatic fallback when
+  the Cline extension/API is unavailable.
+
 ## 0.7.6
 
 - **Reverted 0.7.5's provider/model knobs**: the Cline CLI and the VS Code
