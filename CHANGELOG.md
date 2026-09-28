@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.5] - 2026-09-28
+### Fixed
+- Session discovery could NEVER find sidebar tasks, so the 0.9.0/0.9.3
+  transcript-aware auto-retry never fired: tasks started via the extension
+  API (`startNewTask`) create the session with `prompt: undefined` — the
+  row in `sessions.index.json` ends up with `prompt: null`, and the
+  `[backseat:task:<id>]` marker only survives in the first user message of
+  `<sessionId>.messages.json`. Discovery now falls back to a newest-first
+  scan of session message files (head-read only, cheap). Pure
+  `findSessionIdByMarker()` in logic.ts, unit-tested.
+### Changed
+- Auto-retry is now precise instead of blind: it presses Cline's primary
+  button only when the LATEST transcript message really is
+  `ask:'api_req_failed'` (new `transcriptInfo()` also reports the last
+  message kind). The 3-minute stall press no longer fires when Cline is
+  asking the user something (approval/follow-up must never be
+  auto-answered) — the status notes "awaiting your input" instead.
+- Credits/quota/auth errors are never auto-pressed (retrying fails
+  identically) — the status says "manual action needed". Other provider
+  errors get at most 3 auto-retries per quiet spell, then the status
+  asks for manual attention. Every press is logged in the status note
+  with a counter.
+- `tryResumeViaClineApi` falls back to the conventional messages path
+  (`<sessionId>/<sessionId>.messages.json`) when the index row has no
+  messagesPath.
 ## [0.9.4] - 2026-09-28
 ### Fixed
 - Orphan recovery could leave a task claimed by a dead runner forever:
