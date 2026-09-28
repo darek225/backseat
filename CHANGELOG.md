@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.1] - 2026-09-28
+### Fixed
+- Orphan recovery: tasks left in `tasks/active/` by a dead runner (extension
+  upgrade, window reload, crash) are moved back to `tasks/pending/` on startup
+  and run fresh. A task is only reclaimed when claimed by a different runner id
+  AND its heartbeat is older than 5 minutes — live runners (e.g. another VS
+  Code window) keep heartbeating, so they are never stolen.
+- Verified against Cline's webview source: the "Resume Task" button is the
+  primary button and sends the same `yesButtonClicked` response the extension
+  API's `pressPrimaryButton()` fires — 0.9.0's auto-retry genuinely clicks it.
 ## 0.9.0
 
 - **Backseat now reads Cline's session store** (`~/.cline/data/sessions/`,
