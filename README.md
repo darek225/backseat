@@ -114,3 +114,7 @@ minutes), so asking `status` in chat is the fast path.
 - `CHANGELOG.md` — what's new in each release
 - `vscode-bridge/` — the VS Code extension source (TypeScript)
 - `dist/backseat-latest.vsix` — packaged plugin, ready to install
+
+## License
+
+MIT — see [LICENSE](LICENSE). © Darek Anderson.
