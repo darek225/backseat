@@ -1,158 +1,62 @@
-# Muse ↔ Cline GitHub Bridge
+# Backseat
 
-An agentic loop between two AIs, using GitHub as the only bridge:
+**Backseat-drive your Cline coding agent from your phone.**
 
-- **Muse** (Meta's personal agent, this is me) acts as the **architect**.
-  You chat with me on your phone. I break work into tasks, write the exact
-  prompts Cline should run, and queue them in a GitHub repo.
-- **Cline** (running on your Windows PC, powered by your DeepSeek key) acts
-  as the **builder**. A small watcher script on your PC polls the repo,
-  runs `cline --yolo "<prompt>"` headlessly, and pushes status and results
-  back to the repo.
-- **You** get a portal: ask me for status, queue new work, or change plans
-  from chat. I poll the repo on a schedule and report back.
-
-No open ports. No shared API keys. No direct connection between my machine
-and your PC — GitHub is the only channel.
-
-## Architecture
+Chat with Muse anywhere — your PC does the coding. You architect from the
+couch; Cline builds in VS Code. No servers, no open ports, no shared API
+keys. GitHub is the only wire.
 
 ```
-┌─────────────────────┐        ┌──────────────────┐        ┌─────────────────────┐
-│  Muse (cloud VM)    │        │  GitHub repo     │        │  Your Windows PC    │
-│                     │        │  (bridge repo)   │        │                     │
-│  chat with Darek    │        │                  │        │  watcher.py         │
-│        │            │        │  tasks/pending/  │        │    polls every ~20s │
-│        ▼            │ push   │  tasks/active/   │  pull  │        │            │
-│  write task JSON ──────────▶│  tasks/done/     │◀────── │  claim task         │
-│                     │        │  tasks/status/   │        │        │            │
-│  cron poll ◀────────────────│  (status+logs)   │◀────── │  run cline --yolo   │
-│        │            │ pull   │                  │  push  │        │            │
-│        ▼            │        │                  │        │  push status/logs   │
-│  report to Darek    │        │                  │        │        ▼            │
-│  in chat            │        │                  │        │  next task...       │
-└─────────────────────┘        └──────────────────┘        └─────────────────────┘
+you (phone) ──chat──▶ Muse (architect) ──git──▶ Backseat extension ──▶ Cline (builder)
+   "add a login page"      queues tasks          runs them on your PC     in VS Code
 ```
 
-Task lifecycle: `pending` → `active` → `done`.
-Live progress (heartbeats, log tails) goes to `tasks/status/<id>.json`
-so Muse can report status without waiting for completion.
+## Instant setup
 
-## Repo layout (the bridge repo on GitHub)
+**1. Send this repo to your Muse.**
+Paste the repo link into Muse and say *"set up Backseat with this repo."*
+It reads `MUSE.md`, clones the repo, and starts watching for work. Its side
+is fully automatic from there.
 
-```
-bridge-repo/
-├── tasks/
-│   ├── pending/      # tasks queued by Muse, waiting for the PC
-│   ├── active/       # claimed by the watcher (one at a time)
-│   ├── done/         # finished (success or failure)
-│   └── status/       # live status JSON per task id
-├── prompts/          # optional: reusable prompt templates
-└── README.md         # this file's PC/agent setup summary
-```
+**2. Install the VS Code plugin.**
+Download [`dist/backseat-0.1.0.vsix`](dist/backseat-0.1.0.vsix), then in
+VS Code: Extensions → `…` → *Install from VSIX*. Requires the Cline extension
+(signed in — your DeepSeek key never leaves your PC) and Git.
 
-Exact file formats are documented in [protocol.md](protocol.md).
+**3. Open this repo folder in VS Code.**
+That's it — Backseat auto-detects the bridge repo and starts polling. No
+settings, no terminal windows, no always-on scripts. Close VS Code and it's off.
 
-## Setup
+Now chat with Muse: `status` to see what's happening, `queue: <description>`
+to send Cline work.
 
-### 1. Create the bridge repo
+## How it works
 
-Create a new **private** GitHub repo (e.g. `darek/muse-cline-bridge`).
-Private is recommended since task contents may include project details.
+- **Muse** breaks your requests into tasks: `tasks/pending/<id>.json`
+  (prompt, project dir, timeout — see `protocol.md`).
+- **The Backseat extension** polls the repo, claims the oldest task
+  (the git push is the lock), and hands the prompt to Cline — via Cline's
+  extension API when available, falling back to the headless `cline --yolo`
+  CLI. Live progress lands in `tasks/status/<id>.json`.
+- **Finished tasks** move to `tasks/done/` with the result; Muse reports
+  back in chat like a human would.
 
-Clone it in two places:
+One task at a time. Heartbeats every ~30s while running. Muse's checks are
+polling (every few minutes), so asking `status` in chat is the fast path.
 
-- On your PC: `C:\Users\<you>\muse-cline-bridge`
-- On Muse's machine: I handle this side myself.
+## Security
 
-### 2. PC side (Windows)
-
-Prerequisites: Python 3.10+, Git, VS Code with the Cline extension,
-and the Cline CLI installed and authenticated (`cline auth` or API key
-configured — your DeepSeek key stays in Cline's own config on your PC).
-
-```bat
-cd C:\Users\<you>\muse-cline-bridge
-copy pc\config.example.json pc\config.json
-notepad pc\config.json
-pc\setup.bat
-python pc\watcher.py
-```
-
-See [pc/README section below](#pc-side-details) and `pc/config.example.json`
-for options. Keep the watcher running while you want the loop active
-(a terminal window, or Task Scheduler for autostart).
-
-### 3. Muse side (agent)
-
-I poll the repo on a schedule (cron) with `agent/muse_poller.py`, which
-pulls and prints a compact summary of new/changed tasks and statuses.
-On each run I check that output and report anything new to you in chat.
-
-Chat commands you can use with me:
-
-- "status" — what's running, what's queued, what's done
-- "queue: <description>" — add a new task for Cline
-- "cancel <task-id>" — stop a pending task (I move it to done/cancelled)
-- "show logs <task-id>" — latest log tail from Cline's run
-
-## Security notes
-
-- **No secrets in the repo.** Tasks contain prompts, file paths, and repo
-  URLs only. Never put API keys, tokens, or passwords in task JSON.
-- **Your DeepSeek key never leaves your PC.** Cline reads it from its own
-  local config. The watcher only invokes `cline` as a subprocess; the key
-  is never sent to GitHub or to Muse.
-- **Git auth is yours.** The watcher uses whatever git credentials your PC
-  already has (Git Credential Manager, SSH). Muse uses its own.
-- **No open ports.** Both sides only make outbound HTTPS connections to
-  GitHub. Nothing listens for inbound connections.
-- **Yolo mode runs commands on your PC.** `cline --yolo` auto-approves tool
-  use, so Cline can run shell commands and edit files without asking.
-  Only queue tasks you trust, and point Cline at project directories —
-  never system directories. Review `tasks/pending/` before the watcher
-  picks them up if you want a human gate.
+- **Auto-approve is the point — and the risk.** Cline runs unsupervised, so
+  only queue work you'd let run on its own, pointed at project directories.
+- **No secrets in the repo.** Tasks carry prompts and paths only. API keys
+  stay in Cline's own config on the PC.
 - **Private repo recommended.**
 
-## Latency expectations (be honest)
+## Files
 
-- **PC side is fast:** the watcher polls every ~20 seconds and pushes
-  status immediately after Cline finishes a task. A finished task is on
-  GitHub within seconds.
-- **Muse side is loose:** I check the repo on a cron schedule (every few
-  minutes, give-or-take). So when Cline finishes, I may not notice for a
-  few minutes. If you ask me "status" in chat, I check immediately —
-  that's the fast path. The automatic background updates are the slow path.
-
-If you need tighter Muse-side latency, ask me and I can shorten the cron
-interval (at the cost of more polling).
-
-## PC side details
-
-`pc/watcher.py` loop:
-
-1. `git pull` the bridge repo.
-2. Look in `tasks/pending/` for the oldest task JSON.
-3. Claim it: `git mv` to `tasks/active/`, commit, push. (If the push
-   fails because someone else claimed it, skip — first claim wins.)
-4. Write `tasks/status/<id>.json` = `{"state":"running", ...}`, push.
-5. Run `cline --yolo "<prompt>"` in the task's working directory,
-   streaming output to a local log file and updating the status file
-   periodically (every ~30s) with a log tail.
-6. On exit: move task JSON to `tasks/done/` with result fields,
-   write final status, commit, push.
-
-If `cline` isn't on PATH or errors on launch, the task is marked failed
-with the error message — check `pc/config.json` for the `cline_cmd`
-override.
-
-## Files in this project
-
-- `README.md` — this file
-- `protocol.md` — exact JSON schemas for task and status files
-- `pc/watcher.py` — Windows watcher (stdlib only + git CLI)
-- `pc/config.example.json` — watcher configuration template
-- `pc/requirements.txt` — notes that only stdlib is used
-- `pc/setup.bat` — Windows setup helper
-- `agent/muse_poller.py` — Muse-side poll script for cron
-- `agent/README.md` — how Muse operates the agent side
+- `MUSE.md` — setup brief: send the repo to any Muse and it configures itself
+- `protocol.md` — exact JSON schemas for tasks and status files
+- `vscode-bridge/` — the VS Code extension source (TypeScript)
+- `dist/backseat-0.1.0.vsix` — packaged plugin, ready to install
+- `pc/` — legacy standalone watcher (superseded by the extension; kept as reference)
+- `agent/` — Muse-side poll script for scheduled checks
