@@ -186,3 +186,10 @@ test('transcriptText: still reads Anthropic-style messages', () => {
 test('transcriptText: missing file returns empty string', () => {
   assert.equal(logic.transcriptText('/nonexistent/messages.json', 1000), '');
 });
+
+test('isClaimedByDeadRunner: dead pid reclaims', () => {
+  assert.equal(logic.isClaimedByDeadRunner('DESKTOP-ABC-20384-z9b5sicb', () => false), true);
+  assert.equal(logic.isClaimedByDeadRunner('myhost-20384-z9b5sicb', () => true), false);
+  assert.equal(logic.isClaimedByDeadRunner('legacy-claim-without-pid', () => false), false);
+  assert.equal(logic.isClaimedByDeadRunner('', () => false), false);
+});

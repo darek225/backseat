@@ -320,3 +320,18 @@ export function transcriptText(messagesPath: string, maxChars: number): string {
  */
 export const TRANSCRIPT_ERROR_RE =
   /api_req_failed|api[ _-]?req[ _-]?failed|rejected the request|request failed|rate.?limit|\b429\b|\b401\b|\b5\d\d\b|insufficient[ _-]?credits|quota|invalid_request/i;
+
+/**
+ * Decide whether a task's claim belongs to a dead runner.
+ * Runner ids embed the extension-host pid as `<hostname>-<pid>-<random>`.
+ * Returns true only when a pid parses AND the probe says it is gone;
+ * unparseable ids fall back to heartbeat-staleness elsewhere (false here).
+ */
+export function isClaimedByDeadRunner(
+  claimedBy: string,
+  pidAlive: (pid: number) => boolean,
+): boolean {
+  const m = typeof claimedBy === 'string' ? claimedBy.match(/-(\d+)-[a-z0-9]{6,}$/) : null;
+  if (!m) return false;
+  return !pidAlive(parseInt(m[1], 10));
+}

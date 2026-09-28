@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.4] - 2026-09-28
+### Fixed
+- Orphan recovery could leave a task claimed by a dead runner forever:
+  the 5-minute heartbeat guard always saw a "fresh" heartbeat right after
+  an upgrade/reload and refused to reclaim. Recovery now probes the pid
+  embedded in the claim (`<host>-<pid>-<random>`); a dead pid reclaims
+  immediately, a live pid (or unparseable id) still defers to the
+  heartbeat guard. Pure `isClaimedByDeadRunner()` in logic.ts, unit-tested.
 ## [0.9.3] - 2026-09-28
 ### Fixed
 - The transcript-aware auto-retry never fired: `transcriptText` only
