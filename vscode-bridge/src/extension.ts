@@ -20,6 +20,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as fs from 'fs';
+import * as https from 'https';
 import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
@@ -50,7 +51,7 @@ interface BridgeTask {
   // empty for command tasks.
   kind?: 'cline' | 'command';
   command?: 'openProject' | 'newProject' | 'closeWindow' | 'deleteProject';
-  args?: { path?: string; name?: string };
+  args?: { path?: string; name?: string; project?: string };
   confirm?: string; // deleteProject requires confirm: "delete"
   max_retries?: number; // retries for transient failures (default 2)
   attempts?: number; // written by this extension: total Cline attempts
@@ -108,6 +109,7 @@ interface BridgeConfig {
   preferClineApi: boolean;
   defaultTimeoutSec: number;
   heartbeatSec: number;
+  notifyTopic: string; // ntfy.sh topic for instant task-finished pings ("" = off)
 }
 
 /**
@@ -196,6 +198,9 @@ class BridgeRunner {
   private taskRunning = false;
   private statusBar: vscode.StatusBarItem;
   private currentTaskLabel = '';
+  private lastPushAt = 0;
+  /** Heartbeats push at most this often — a commit every 30s all night is noise. */
+  private static readonly PUSH_THROTTLE_MS = 120_000;
 
   tree: TaskTreeProvider | undefined;
 
@@ -209,17 +214,28 @@ class BridgeRunner {
     const c = vscode.workspace.getConfiguration('backseat');
     let repoPath = String(c.get('repoPath') ?? '').trim();
     if (!repoPath) {
+      // Survives window reloads (e.g. after switching projects): prefer the
+      // persisted path from the last successful detection.
+      const stored = this.ctx.globalState.get<string>('backseat.repoPath') ?? '';
+      if (stored && fs.existsSync(path.join(stored, 'protocol.md'))) {
+        repoPath = stored;
+      }
+    }
+    if (!repoPath) {
       // Zero-config: if an open workspace folder looks like the bridge repo,
-      // just use it — no settings needed.
+      // just use it — no settings needed. (Match on the docs, not the task
+      // dirs: a fresh template clone has no task dirs until we bootstrap
+      // them in start().)
       const folders = vscode.workspace.workspaceFolders ?? [];
       const found = folders.find(
         (f) =>
-          fs.existsSync(path.join(f.uri.fsPath, 'tasks', 'pending')) &&
-          fs.existsSync(path.join(f.uri.fsPath, 'protocol.md')),
+          fs.existsSync(path.join(f.uri.fsPath, 'protocol.md')) &&
+          fs.existsSync(path.join(f.uri.fsPath, 'MUSE.md')),
       );
       if (found) {
         repoPath = found.uri.fsPath;
         this.out.appendLine(`[backseat] auto-detected bridge repo: ${repoPath}`);
+        void this.ctx.globalState.update('backseat.repoPath', repoPath);
       }
     }
     if (!repoPath) {
@@ -233,10 +249,11 @@ class BridgeRunner {
       preferClineApi: Boolean(c.get('preferClineApi') ?? true),
       defaultTimeoutSec: Number(c.get('defaultTimeoutSec') ?? 1800),
       heartbeatSec: Number(c.get('heartbeatSec') ?? 30),
+      notifyTopic: String(c.get('notifyTopic') ?? '').trim(),
     };
   }
 
-  start(): void {
+  async start(): Promise<void> {
     this.stop();
     const cfg = this.config;
     if (!cfg) {
@@ -248,6 +265,25 @@ class BridgeRunner {
     if (!fs.existsSync(path.join(cfg.repoPath, '.git'))) {
       vscode.window.showErrorMessage(`Backseat: not a git repo: ${cfg.repoPath}`);
       return;
+    }
+    // Bootstrap a fresh template clone: git won't track empty dirs, so make
+    // sure the queue layout exists before polling.
+    for (const d of ['tasks/pending', 'tasks/active', 'tasks/done', 'tasks/status', 'reports']) {
+      try {
+        fs.mkdirSync(path.join(cfg.repoPath, d), { recursive: true });
+      } catch {
+        /* non-fatal */
+      }
+    }
+    // Publish the ntfy topic (if configured) so any Muse can discover it
+    // from the repo — pairing stays repo-based, no extra setup step.
+    if (cfg.notifyTopic) {
+      writeJsonAtomic(path.join(cfg.repoPath, 'notify.json'), {
+        topic: cfg.notifyTopic,
+        events: ['task_finished'],
+        updated_at: utcnow(),
+      });
+      await pushChanges(cfg.repoPath, 'notify.json: publish ntfy topic', this.out);
     }
     this.out.appendLine(`[backseat] starting, repo=${cfg.repoPath} every ${cfg.pollIntervalSec}s`);
     this.setStatus('idle');
@@ -287,7 +323,10 @@ class BridgeRunner {
     if (!cfg || !this.isRunning || this.taskRunning) {
       return;
     }
-    const pull = await git(cfg.repoPath, ['pull', '--ff-only']);
+    // Both sides commit to this repo (Muse queues tasks, we push heartbeats),
+    // so rebase rather than fast-forward-only: a diverged history must not
+    // wedge the bridge.
+    const pull = await git(cfg.repoPath, ['pull', '--rebase']);
     if (pull.code !== 0) {
       this.out.appendLine(`[backseat] pull failed: ${pull.out.slice(-300)}`);
       this.setStatus('error', 'pull failed');
@@ -366,7 +405,7 @@ class BridgeRunner {
     const claimed = await pushChanges(cfg.repoPath, `claim task ${task.id}`, this.out);
     if (!claimed) {
       // Re-sync: did someone else claim it first?
-      await git(cfg.repoPath, ['pull', '--ff-only']);
+      await git(cfg.repoPath, ['pull', '--rebase']);
       const stillOurs = fs.existsSync(path.join(cfg.repoPath, 'tasks', 'active', `${task.id}.json`));
       if (!stillOurs) {
         this.out.appendLine(`[backseat] claim lost for ${task.id} (taken by another runner)`);
@@ -388,6 +427,16 @@ class BridgeRunner {
       return 'timeout'; // we killed the process, so retrying is safe
     }
     return classifyError(output);
+  }
+
+  /** Push, but throttle routine heartbeats so the repo history stays readable. */
+  private async pushThrottled(repoPath: string, message: string, force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - this.lastPushAt < BridgeRunner.PUSH_THROTTLE_MS) {
+      return;
+    }
+    this.lastPushAt = now;
+    await pushChanges(repoPath, message, this.out);
   }
 
   /** Sleep that aborts early when the bridge is stopped. */
@@ -532,39 +581,35 @@ class BridgeRunner {
 
   private async runCommand(cfg: BridgeConfig, task: BridgeTask): Promise<string> {
     const cmd = task.command;
-    const rawPath = task.args?.path?.trim();
     if (!cmd) {
       throw new Error('command task is missing "command"');
     }
     switch (cmd) {
       case 'openProject': {
-        if (!rawPath) {
-          throw new Error('openProject needs args.path');
+        const { targetPath, name } = this.resolveProjectTarget(cfg, task);
+        if (!fs.existsSync(targetPath)) {
+          throw new Error(`project does not exist: ${targetPath}`);
         }
-        if (!fs.existsSync(rawPath)) {
-          throw new Error(`project does not exist: ${rawPath}`);
-        }
-        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(rawPath));
-        return `opened project: ${rawPath}`;
+        await this.switchProjectRoot(targetPath, name);
+        await this.learnProject(cfg, name, targetPath);
+        return `opened project: ${targetPath}`;
       }
       case 'newProject': {
-        if (!rawPath) {
-          throw new Error('newProject needs args.path');
+        const { targetPath, name } = this.resolveProjectTarget(cfg, task);
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`path already exists: ${targetPath}`);
         }
-        if (fs.existsSync(rawPath)) {
-          throw new Error(`path already exists: ${rawPath}`);
-        }
-        fs.mkdirSync(rawPath, { recursive: true });
+        fs.mkdirSync(targetPath, { recursive: true });
         // Best-effort git init so the project starts versioned.
         try {
-          await git(rawPath, ['init']);
+          await git(targetPath, ['init']);
         } catch {
           /* non-fatal */
         }
-        const name = task.args?.name || path.basename(rawPath);
-        fs.writeFileSync(path.join(rawPath, 'README.md'), `# ${name}\n`);
-        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(rawPath));
-        return `created and opened project: ${rawPath}`;
+        fs.writeFileSync(path.join(targetPath, 'README.md'), `# ${name}\n`);
+        await this.switchProjectRoot(targetPath, name);
+        await this.learnProject(cfg, name, targetPath);
+        return `created and opened project: ${targetPath}`;
       }
       case 'closeWindow': {
         return 'closing VS Code window';
@@ -573,10 +618,8 @@ class BridgeRunner {
         if (task.confirm !== 'delete') {
           throw new Error('deleteProject requires "confirm": "delete" in the task');
         }
-        if (!rawPath) {
-          throw new Error('deleteProject needs args.path');
-        }
-        const resolved = path.resolve(rawPath);
+        const { targetPath, name } = this.resolveProjectTarget(cfg, task);
+        const resolved = path.resolve(targetPath);
         if (!fs.existsSync(resolved)) {
           throw new Error(`project does not exist: ${resolved}`);
         }
@@ -591,11 +634,119 @@ class BridgeRunner {
         }
         this.out.appendLine(`[backseat] DELETING project directory: ${resolved}`);
         fs.rmSync(resolved, { recursive: true, force: true });
+        // Drop it from the workspace and the project map if present.
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        const idx = folders.findIndex((f) => path.resolve(f.uri.fsPath) === resolved);
+        if (idx >= 0) {
+          vscode.workspace.updateWorkspaceFolders(idx, 1);
+        }
+        await this.forgetProject(cfg, name, resolved);
         return `deleted project: ${resolved}`;
       }
       default:
         throw new Error(`unknown command: ${cmd}`);
     }
+  }
+
+  /**
+   * Resolve a command task's target. Tasks may name a project
+   * (args.project, looked up in the bridge repo's projects.json) instead of
+   * a raw path, so a typo can't nuke the wrong folder.
+   */
+  private resolveProjectTarget(
+    cfg: BridgeConfig,
+    task: BridgeTask,
+  ): { targetPath: string; name: string } {
+    const args = task.args ?? {};
+    if (args.project) {
+      const name = String(args.project);
+      const mapped = this.readProjectMap(cfg)[name];
+      if (!mapped) {
+        throw new Error(`unknown project "${name}" — add it to projects.json in the bridge repo`);
+      }
+      return { targetPath: mapped, name };
+    }
+    const rawPath = args.path?.trim();
+    if (!rawPath) {
+      throw new Error('command task needs args.project (a name from projects.json) or args.path');
+    }
+    const name = args.name?.trim() || path.basename(path.resolve(rawPath));
+    return { targetPath: rawPath, name };
+  }
+
+  private readProjectMap(cfg: BridgeConfig): Record<string, string> {
+    try {
+      const m = readJson(path.join(cfg.repoPath, 'projects.json')) as Record<string, string>;
+      return m && typeof m === 'object' ? m : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** Remember a project name → path mapping so future tasks can use the name. */
+  private async learnProject(cfg: BridgeConfig, name: string, targetPath: string): Promise<void> {
+    const file = path.join(cfg.repoPath, 'projects.json');
+    const map = this.readProjectMap(cfg);
+    if (map[name] === targetPath) {
+      return;
+    }
+    map[name] = targetPath;
+    writeJsonAtomic(file, map);
+    await pushChanges(cfg.repoPath, `projects.json: learned "${name}"`, this.out);
+  }
+
+  private async forgetProject(cfg: BridgeConfig, name: string, targetPath: string): Promise<void> {
+    const file = path.join(cfg.repoPath, 'projects.json');
+    const map = this.readProjectMap(cfg);
+    if (map[name] !== targetPath) {
+      return;
+    }
+    delete map[name];
+    writeJsonAtomic(file, map);
+    await pushChanges(cfg.repoPath, `projects.json: forgot "${name}"`, this.out);
+  }
+
+  /**
+   * Show a project folder WITHOUT dropping the bridge repo from the window.
+   * vscode.openFolder would reload the window onto the project alone and
+   * kill remote control; instead we add the project as an extra workspace
+   * root (multi-root) and remove project roots we added previously.
+   */
+  private async switchProjectRoot(targetPath: string, label: string): Promise<void> {
+    const cfg = this.config;
+    const bridgePath = cfg ? path.resolve(cfg.repoPath) : undefined;
+    const target = path.resolve(targetPath);
+    const prevTargets = (this.ctx.globalState.get<string[]>('backseat.projectRoots') ?? []).map((p) =>
+      path.resolve(p),
+    );
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    const kept: { uri: vscode.Uri; name: string }[] = [];
+    for (const f of folders) {
+      const p = path.resolve(f.uri.fsPath);
+      if (p === target) {
+        kept.push({ uri: f.uri, name: f.name });
+        continue;
+      }
+      if (bridgePath && p === bridgePath) {
+        kept.push({ uri: f.uri, name: f.name }); // never drop the bridge
+        continue;
+      }
+      if (prevTargets.includes(p)) {
+        continue; // drop project roots we added on earlier switches
+      }
+      kept.push({ uri: f.uri, name: f.name }); // keep the user's other folders
+    }
+    if (!kept.some((r) => path.resolve(r.uri.fsPath) === target)) {
+      kept.push({ uri: vscode.Uri.file(target), name: label });
+    }
+    const ok = vscode.workspace.updateWorkspaceFolders(0, folders.length, ...kept);
+    if (ok === false) {
+      this.out.appendLine('[backseat] multi-root switch failed; falling back to openFolder');
+      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(target));
+      return;
+    }
+    await this.ctx.globalState.update('backseat.projectRoots', [target]);
+    this.out.appendLine(`[backseat] workspace now: ${kept.map((r) => r.name).join(', ')}`);
   }
 
   // -- Cline extension API path -------------------------------------------
@@ -669,11 +820,10 @@ class BridgeRunner {
       if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
         lastHeartbeat = Date.now();
         await this.writeStatus(cfg, task.id, 'running', '', 'cline (extension) working');
-        await pushChanges(cfg.repoPath, `task ${task.id}: heartbeat`, this.out);
+        await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
       }
       try {
-        const hist = await api.getTaskHistory();
-        const fresh = hist.filter((h) => {
+        const hist = await api.getTaskHistory();        const fresh = hist.filter((h) => {
           const id = idOf(h);
           return id && !beforeIds.has(id);
         });
@@ -779,7 +929,7 @@ class BridgeRunner {
       const heartbeat = setInterval(() => {
         void (async () => {
           await this.writeStatus(cfg, task.id, 'running', tailLines(output), 'cline working');
-          await pushChanges(cfg.repoPath, `task ${task.id}: heartbeat`, this.out);
+          await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
         })();
       }, cfg.heartbeatSec * 1000);
 
@@ -830,6 +980,55 @@ class BridgeRunner {
 
     await this.writeStatus(cfg, task.id, result, tailLines(output), `finished: ${result} (exit ${exitCode})`);
     await pushChanges(cfg.repoPath, `task ${task.id}: ${result}`, this.out);
+    await this.notifyNtfy(cfg, task, result);
+  }
+
+  /**
+   * Instant "task finished" ping via ntfy.sh (optional, off by default).
+   * Git stays the source of truth — this is just the doorbell so Muse
+   * doesn't have to poll blind. Never throws: a failed ping must not
+   * break task finishing.
+   */
+  private async notifyNtfy(cfg: BridgeConfig, task: BridgeTask, result: TaskState): Promise<void> {
+    const topic = cfg.notifyTopic?.trim();
+    if (!topic) {
+      return;
+    }
+    const label = task.title || task.id;
+    const emoji = result === 'success' ? '✅' : result === 'cancelled' ? '🚫' : '❌';
+    const body = `${emoji} Backseat: "${label}" finished: ${result}`;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const req = https.request(
+          {
+            hostname: 'ntfy.sh',
+            path: `/${encodeURIComponent(topic)}`,
+            method: 'POST',
+            headers: {
+              Title: 'Backseat task finished',
+              Tags: result === 'success' ? 'white_check_mark' : 'x',
+              'Content-Type': 'text/plain',
+              'Content-Length': Buffer.byteLength(body),
+            },
+            timeout: 15_000,
+          },
+          (res) => {
+            res.resume(); // drain
+            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+              resolve();
+            } else {
+              reject(new Error(`ntfy HTTP ${res.statusCode}`));
+            }
+          },
+        );
+        req.on('error', reject);
+        req.on('timeout', () => req.destroy(new Error('ntfy timeout')));
+        req.end(body);
+      });
+      this.out.appendLine(`[backseat] ntfy ping sent for ${task.id}`);
+    } catch (e: any) {
+      this.out.appendLine(`[backseat] ntfy ping failed (non-fatal): ${e?.message ?? e}`);
+    }
   }
 
   private async writeStatus(
@@ -871,6 +1070,95 @@ class BridgeRunner {
     this.out.show();
     this.out.appendLine('[backseat] ' + lines.join(' | '));
     vscode.window.showInformationMessage(lines.join('\n'));
+  }
+
+  /**
+   * Setup self-check: verifies every link in the chain (repo, git auth,
+   * cline CLI, Cline extension + API) and prints a pasteable report.
+   */
+  async doctor(): Promise<void> {
+    const lines: string[] = ['Backseat doctor'];
+    const mark = (good: boolean, label: string, detail = '') =>
+      lines.push(`${good ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
+
+    const cfg = this.config;
+    mark(!!cfg, 'bridge repo detected', cfg?.repoPath ?? 'open the bridge repo folder or set backseat.repoPath');
+    if (cfg) {
+      for (const d of ['tasks/pending', 'tasks/active', 'tasks/done', 'tasks/status']) {
+        try {
+          fs.mkdirSync(path.join(cfg.repoPath, d), { recursive: true });
+        } catch {
+          /* reported below */
+        }
+      }
+      const dirsOk = ['tasks/pending', 'tasks/active', 'tasks/done', 'tasks/status'].every((d) =>
+        fs.existsSync(path.join(cfg.repoPath, d)),
+      );
+      mark(dirsOk, 'task directories present');
+
+      const gitv = await git(cfg.repoPath, ['--version']);
+      mark(gitv.code === 0, 'git available', gitv.out.trim().split('\n')[0] || 'not found');
+
+      // Fail fast on auth prompts — never hang the doctor on a credential popup.
+      const lsRemote = await new Promise<{ code: number; out: string }>((resolve) => {
+        cp.execFile(
+          'git',
+          ['ls-remote', 'origin', 'HEAD'],
+          {
+            cwd: cfg.repoPath,
+            timeout: 20_000,
+            windowsHide: true,
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          },
+          (err: any, stdout: string, stderr: string) =>
+            resolve({ code: err ? 1 : 0, out: String(stdout ?? '') + String(stderr ?? '') }),
+        );
+      });
+      mark(
+        lsRemote.code === 0,
+        'git push/pull auth works',
+        lsRemote.code === 0 ? 'reached origin' : lsRemote.out.slice(-200).trim() || 'failed',
+      );
+
+      const clineCmd = cfg.clineCommand || 'cline';
+      const clinev = await new Promise<{ code: number; out: string }>((resolve) => {
+        cp.execFile(
+          clineCmd,
+          ['--version'],
+          { timeout: 20_000, windowsHide: true, shell: process.platform === 'win32' },
+          (err: any, stdout: string, stderr: string) =>
+            resolve({ code: err ? 1 : 0, out: String(stdout ?? stderr ?? '').trim().split('\n')[0] }),
+        );
+      });
+      mark(clinev.code === 0, `cline CLI ("${clineCmd}") found`, clinev.out || `not on PATH — set backseat.clineCommand`);
+    }
+
+    const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
+    mark(!!ext, 'Cline VS Code extension installed', ext ? ext.packageJSON?.version ?? '' : 'install Cline from the marketplace');
+    if (ext) {
+      try {
+        const api = (await ext.activate()) as ClineApi;
+        mark(typeof api?.startNewTask === 'function', 'Cline API: startNewTask');
+        mark(
+          typeof api?.getTaskHistory === 'function',
+          'Cline API: completion signal',
+          typeof api?.getTaskHistory === 'function'
+            ? ''
+            : 'missing — Backseat will use the CLI fallback (fine)',
+        );
+      } catch (e: any) {
+        mark(false, 'Cline extension activates', e?.message ?? String(e));
+      }
+    }
+
+    this.out.show();
+    this.out.appendLine('[backseat] ' + lines.join('\n[backseat] '));
+    const fails = lines.filter((l) => l.startsWith('FAIL')).length;
+    await vscode.window.showInformationMessage(
+      fails === 0
+        ? 'Backseat doctor: all checks passed.'
+        : `Backseat doctor: ${fails} check(s) failed — details in Output > Backseat.`,
+    );
   }
 }
 
@@ -998,12 +1286,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('backseat.start', () => {
-      runner.start();
+      void runner.start();
       out.show();
     }),
     vscode.commands.registerCommand('backseat.stop', () => runner.stop()),
     vscode.commands.registerCommand('backseat.runOnce', () => void runner.pollOnce()),
     vscode.commands.registerCommand('backseat.showStatus', () => runner.showStatus()),
+    vscode.commands.registerCommand('backseat.doctor', () => void runner.doctor()),
   );
 
   // Refresh the tree whenever the repo changes on disk (e.g. after git pull).
@@ -1024,7 +1313,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   if (runner.config?.autoStart) {
-    runner.start();
+    void runner.start();
   } else if (!runner.config) {
     out.appendLine('[backseat] set "backseat.repoPath" to enable polling.');
   }
