@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.3
+
+- **CLI prompt quoting fixed**: on Windows the extension spawned the Cline
+  CLI with `shell: true`, which joins the command with plain spaces — every
+  multi-word prompt arrived as separate argv entries and Cline rejected it
+  ("Unknown command or unquoted prompt"), so no task could ever run. The
+  extension now routes through `cmd.exe /d /s /c` with `shell: false` so
+  each argument is quoted correctly. The spawn target is a pure function
+  (`clineSpawnTarget` in logic.ts) covered by unit tests.
+
 ## 0.7.2
 
 - **Doctor push check**: `git push --dry-run` used to report a behind-origin
