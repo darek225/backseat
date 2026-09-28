@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Setup hardening**: if the auto-clone fails (usually the GitHub sign-in,
+  which the extension can't do itself), you now get a "Run clone in terminal"
+  button that opens a terminal with the exact `git clone` command ready —
+  sign in there, reload, done. The doctor prints its own version (so a stale
+  install is obvious), reports "bridge repo cloned" as its own check instead
+  of failing confusing git checks, and no longer creates task directories
+  when there's no repo. An incomplete managed clone is cleared automatically
+  on the next start instead of asking you to delete it by hand.
+
+
 - **Self-managed bridge clone**: the extension no longer needs you to open the
   bridge repo folder in VS Code. Set `backseat.bridgeRepo` to your private repo
   (`owner/repo` or a git URL) and the extension clones it into
