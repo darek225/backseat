@@ -2,20 +2,17 @@
 
 ## Unreleased
 
-- **Setup Doctor honesty fix**: the "git push/pull auth works" check only ran
-  `git ls-remote`, which proves *read* access. It is now labeled "git read
-  access works (ls-remote)", and a new check runs `git push --dry-run` to
-  prove *write* permission without pushing anything. The whole bridge is
-  push-based (claims, statuses, results), so a read-only remote would have
-  passed the old doctor and then failed at runtime.
-- **No more notify.json churn**: the extension rewrote and pushed `notify.json`
-  on every restart (the `updated_at` timestamp always differed). It now reads
-  the published topic first and only writes/pushes when the topic actually
-  changed.
-- **Refactor for testability**: pure logic (error classification, retry
-  policy, project-nickname resolution, projects.json auto-learn/forget merge
-  rules, deleteProject protection, Cline history heuristics, notify-topic
-  read) extracted from `extension.ts` into `src/logic.ts`; behavior unchanged.
+- **Self-managed bridge clone**: the extension no longer needs you to open the
+  bridge repo folder in VS Code. Set `backseat.bridgeRepo` to your private repo
+  (`owner/repo` or a git URL) and the extension clones it into
+  `~/.backseat/bridge` and manages it itself — Backseat now works in every VS
+  Code window, whatever project you have open. `backseat.repoPath` remains as
+  an advanced explicit-path override. If the setting ever points at a
+  different repo than the managed clone, startup refuses with a clear error
+  instead of syncing the wrong repo.
+
+
+
 ## 0.6.0
 
 - **Instant task pickup via ntfy wake-ups**: the other half of the instant
@@ -30,6 +27,21 @@
   `MUSE.md` tells the Muse to verify its GitHub access, watch for
   token-expiry symptoms, and publish the wake-up ping after every queued
   task. (ntfy is machine-to-machine signaling only — no app, no account.)
+
+- **Setup Doctor honesty fix**: the "git push/pull auth works" check only ran
+  `git ls-remote`, which proves *read* access. It is now labeled "git read
+  access works (ls-remote)", and a new check runs `git push --dry-run` to
+  prove *write* permission without pushing anything. The whole bridge is
+  push-based (claims, statuses, results), so a read-only remote would have
+  passed the old doctor and then failed at runtime.
+- **No more notify.json churn**: the extension rewrote and pushed `notify.json`
+  on every restart (the `updated_at` timestamp always differed). It now reads
+  the published topic first and only writes/pushes when the topic actually
+  changed.
+- **Refactor for testability**: pure logic (error classification, retry
+  policy, project-nickname resolution, projects.json auto-learn/forget merge
+  rules, deleteProject protection, Cline history heuristics, notify-topic
+  read) extracted from `extension.ts` into `src/logic.ts`; behavior unchanged.
 
 ## 0.5.0
 

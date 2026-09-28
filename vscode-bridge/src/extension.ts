@@ -27,6 +27,7 @@ import { promisify } from 'util';
 import {
   ErrorKind,
   TaskState,
+  bridgeRepoUrl,
   classifyError,
   completionMarker,
   deleteProtectionReason,
@@ -80,6 +81,8 @@ interface BridgeTask {
 
 interface BridgeConfig {
   repoPath: string;
+  /** Set when the repo is the extension's self-managed clone: URL to clone/verify. */
+  cloneUrl?: string;
   pollIntervalSec: number;
   autoStart: boolean;
   clineCommand: string;
@@ -87,6 +90,11 @@ interface BridgeConfig {
   defaultTimeoutSec: number;
   heartbeatSec: number;
   notifyTopic: string; // ntfy.sh topic for instant task-finished pings ("" = off)
+}
+
+/** Where the extension keeps its self-managed bridge clone. */
+function managedBridgeDir(): string {
+  return path.join(os.homedir(), '.backseat', 'bridge');
 }
 
 /**
@@ -188,37 +196,13 @@ class BridgeRunner {
 
   get config(): BridgeConfig | undefined {
     const c = vscode.workspace.getConfiguration('backseat');
-    let repoPath = String(c.get('repoPath') ?? '').trim();
-    if (!repoPath) {
-      // Survives window reloads (e.g. after switching projects): prefer the
-      // persisted path from the last successful detection.
-      const stored = this.ctx.globalState.get<string>('backseat.repoPath') ?? '';
-      if (stored && fs.existsSync(path.join(stored, 'protocol.md'))) {
-        repoPath = stored;
-      }
-    }
-    if (!repoPath) {
-      // Zero-config: if an open workspace folder looks like the bridge repo,
-      // just use it — no settings needed. (Match on the docs, not the task
-      // dirs: a fresh template clone has no task dirs until we bootstrap
-      // them in start().)
-      const folders = vscode.workspace.workspaceFolders ?? [];
-      const found = folders.find(
-        (f) =>
-          fs.existsSync(path.join(f.uri.fsPath, 'protocol.md')) &&
-          fs.existsSync(path.join(f.uri.fsPath, 'MUSE.md')),
-      );
-      if (found) {
-        repoPath = found.uri.fsPath;
-        this.out.appendLine(`[backseat] auto-detected bridge repo: ${repoPath}`);
-        void this.ctx.globalState.update('backseat.repoPath', repoPath);
-      }
-    }
-    if (!repoPath) {
+    const resolved = this.resolveRepo(c);
+    if (!resolved) {
       return undefined;
     }
     return {
-      repoPath: path.resolve(repoPath.replace(/^~(?=$|[\\/])/, process.env.HOME ?? '')),
+      repoPath: resolved.repoPath,
+      cloneUrl: resolved.cloneUrl,
       pollIntervalSec: Number(c.get('pollIntervalSec') ?? 30),
       autoStart: Boolean(c.get('autoStart') ?? true),
       clineCommand: String(c.get('clineCommand') ?? 'cline'),
@@ -229,16 +213,97 @@ class BridgeRunner {
     };
   }
 
+  /**
+   * Where should the bridge repo live? Priority:
+   * 1. `backseat.repoPath` — explicit local path (advanced override).
+   * 2. `backseat.bridgeRepo` — "owner/repo" or git URL; the extension keeps
+   *    its own clone in ~/.backseat/bridge, so Backseat works in every VS Code
+   *    window without opening any special folder.
+   * 3. Previously auto-detected path persisted in globalState.
+   * 4. Zero-config: an open workspace folder that looks like the bridge repo.
+   */
+  private resolveRepo(
+    c: vscode.WorkspaceConfiguration,
+  ): { repoPath: string; cloneUrl?: string } | undefined {
+    const explicit = String(c.get('repoPath') ?? '').trim();
+    if (explicit) {
+      return { repoPath: path.resolve(explicit.replace(/^~(?=$|[\\/])/, os.homedir())) };
+    }
+    const cloneUrl = bridgeRepoUrl(String(c.get('bridgeRepo') ?? ''));
+    if (cloneUrl) {
+      return { repoPath: managedBridgeDir(), cloneUrl };
+    }
+    // Survives window reloads (e.g. after switching projects): prefer the
+    // persisted path from the last successful detection.
+    const stored = this.ctx.globalState.get<string>('backseat.repoPath') ?? '';
+    if (stored && fs.existsSync(path.join(stored, 'protocol.md'))) {
+      return { repoPath: stored };
+    }
+    // Zero-config: if an open workspace folder looks like the bridge repo,
+    // just use it — no settings needed. (Match on the docs, not the task
+    // dirs: a fresh template clone has no task dirs until we bootstrap
+    // them in start().)
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    const found = folders.find(
+      (f) =>
+        fs.existsSync(path.join(f.uri.fsPath, 'protocol.md')) &&
+        fs.existsSync(path.join(f.uri.fsPath, 'MUSE.md')),
+    );
+    if (found) {
+      const repoPath = found.uri.fsPath;
+      this.out.appendLine(`[backseat] auto-detected bridge repo: ${repoPath}`);
+      void this.ctx.globalState.update('backseat.repoPath', repoPath);
+      return { repoPath };
+    }
+    return undefined;
+  }
+
   async start(): Promise<void> {
     this.stop();
     const cfg = this.config;
     if (!cfg) {
       vscode.window.showWarningMessage(
-        'Backseat: open your bridge repo folder in VS Code (or set "backseat.repoPath") to start.',
+        'Backseat: set "backseat.bridgeRepo" to your private bridge repo (e.g. "you/backseat-bridge"). The extension clones and manages it automatically — no folder to open.',
       );
       return;
     }
-    if (!fs.existsSync(path.join(cfg.repoPath, '.git'))) {
+    if (cfg.cloneUrl) {
+      // Self-managed clone: create it on first run, sanity-check it after.
+      if (!fs.existsSync(path.join(cfg.repoPath, '.git'))) {
+        if (fs.existsSync(cfg.repoPath)) {
+          vscode.window.showErrorMessage(
+            `Backseat: ${cfg.repoPath} exists but is not a git repo. Delete it or set "backseat.repoPath" explicitly.`,
+          );
+          return;
+        }
+        this.out.appendLine(`[backseat] cloning bridge repo to ${cfg.repoPath} ...`);
+        try {
+          fs.mkdirSync(path.dirname(cfg.repoPath), { recursive: true });
+        } catch {
+          /* ignore */
+        }
+        const clone = await git(os.homedir(), ['clone', cfg.cloneUrl, cfg.repoPath]);
+        if (clone.code !== 0 || !fs.existsSync(path.join(cfg.repoPath, '.git'))) {
+          vscode.window.showErrorMessage(
+            'Backseat: could not clone the bridge repo. Check "backseat.bridgeRepo" and your git credentials.',
+          );
+          this.out.appendLine(`[backseat] clone failed: ${clone.out.slice(-500)}`);
+          return;
+        }
+        this.out.appendLine('[backseat] bridge repo cloned.');
+      } else {
+        // Guard against a changed backseat.bridgeRepo pointing at a new repo
+        // while the old clone is still on disk.
+        const origin = (await git(cfg.repoPath, ['remote', 'get-url', 'origin'])).out.trim();
+        const norm = (u: string) => u.replace(/\.git$/, '').replace(/\/$/, '');
+        if (origin && norm(origin) !== norm(cfg.cloneUrl)) {
+          vscode.window.showErrorMessage(
+            `Backseat: the managed clone at ${cfg.repoPath} points at ${origin}, but "backseat.bridgeRepo" wants ${cfg.cloneUrl}. Delete the folder to re-clone, or fix the setting.`,
+          );
+          return;
+        }
+      }
+    } else if (!fs.existsSync(path.join(cfg.repoPath, '.git'))) {
       vscode.window.showErrorMessage(`Backseat: not a git repo: ${cfg.repoPath}`);
       return;
     }
@@ -1164,7 +1229,7 @@ class BridgeRunner {
       lines.push(`${good ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
 
     const cfg = this.config;
-    mark(!!cfg, 'bridge repo detected', cfg?.repoPath ?? 'open the bridge repo folder or set backseat.repoPath');
+    mark(!!cfg, 'bridge repo detected', cfg?.repoPath ?? 'set backseat.bridgeRepo to your private bridge repo (owner/repo)');
     if (cfg) {
       for (const d of ['tasks/pending', 'tasks/active', 'tasks/done', 'tasks/status']) {
         try {

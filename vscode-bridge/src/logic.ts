@@ -223,3 +223,22 @@ export function completionMarker(entry: unknown): 'done' | 'failed' | undefined 
   }
   return undefined;
 }
+
+/**
+ * Turn the `backseat.bridgeRepo` setting into a cloneable git URL.
+ * Accepts "owner/repo" shorthand or a full URL / SSH string.
+ * Returns undefined for blank or unrecognized input.
+ */
+export function bridgeRepoUrl(repo: string): string | undefined {
+  const r = (repo ?? '').trim().replace(/\/$/, '');
+  if (!r) {
+    return undefined;
+  }
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(r)) {
+    return `https://github.com/${r}.git`;
+  }
+  if (/^(https?:\/\/|git@|ssh:\/\/)/.test(r) || r.endsWith('.git')) {
+    return r;
+  }
+  return undefined;
+}

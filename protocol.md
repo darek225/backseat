@@ -130,7 +130,7 @@ Commands:
 
 | Command         | Args             | Effect                                              |
 |----------------|------------------|-----------------------------------------------------|
-| `openProject`  | `args.project` or `args.path` | Adds the folder as a workspace root (the bridge repo stays open, so remote control never drops); removes previously opened project roots |
+| `openProject`  | `args.project` or `args.path` | Adds the folder as a workspace root (the bridge repo lives in the extension's managed clone, so remote control never drops); removes previously opened project roots |
 | `newProject`   | `args.path`, `args.name?` | Creates the folder, `git init`, stub README, adds it as a workspace root |
 | `closeWindow`  | —                | Publishes the done state, then closes VS Code       |
 | `deleteProject`| `args.project` or `args.path`, `confirm: "delete"` | **Permanently deletes** the directory; also drops it from the workspace and `projects.json` |
