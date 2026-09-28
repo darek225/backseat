@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0
+
+- **Backseat now reads Cline's session store** (`~/.cline/data/sessions/`,
+  the plain-JSON store Cline's extension, CLI, and hub all share): each
+  sidebar task is matched by a `[backseat:task:<id>]` marker in its prompt,
+  and Backseat watches its live status, transcript, and liveness.
+  Completion is detected from a terminal session status even if Cline never
+  writes the done-file; an error visible in the transcript (provider
+  rejection, rate limit, etc.) triggers a fast retry via the primary
+  button; a quiet transcript triggers the 3-minute stall retry. The
+  done-file remains the primary result carrier (Cline's summary).
+
 ## 0.8.1
 
 - Sidebar tasks now watch workspace file activity as a liveness signal. If
