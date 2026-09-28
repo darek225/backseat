@@ -1172,6 +1172,10 @@ class BridgeRunner {
           cwd: projectDir,
           shell: target.shell,
           windowsHide: true,
+          // stdin closed: if the CLI ever prompts interactively (first-run
+          // trust, login), it gets EOF and fails fast instead of hanging
+          // silently until the task timeout.
+          stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (e: any) {
         done({ result: 'failed', output: `could not launch cline: ${e?.message}`, exitCode: 1 });

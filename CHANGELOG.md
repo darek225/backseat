@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.4
+
+- **CLI stdin closed**: the spawned Cline process now gets `stdio: ['ignore',
+  'pipe', 'pipe']`. If the CLI ever waits on an interactive prompt
+  (first-run trust, login), it receives EOF and fails fast with visible
+  output instead of hanging silently until the task timeout.
+
 ## 0.7.3
 
 - **CLI prompt quoting fixed**: on Windows the extension spawned the Cline
