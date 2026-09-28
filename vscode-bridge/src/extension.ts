@@ -40,6 +40,7 @@ import {
   utcnow,
   transcriptText,
   TRANSCRIPT_ERROR_RE,
+  isClaimedByDeadRunner,
 } from './logic';
 import {
   DashboardBackend,
@@ -1759,6 +1760,20 @@ class BridgeRunner {
    * its heartbeat is older than 5 minutes — a live runner (e.g. another VS
    * Code window) keeps heartbeating, so we never steal those.
    */
+  /**
+   * Probe whether a pid is still alive (signal 0 — no actual signal sent).
+   * ESRCH means the process is gone; EPERM means it exists but isn't ours
+   * (conservative: treat as alive).
+   */
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e: any) {
+      return e?.code !== 'ESRCH';
+    }
+  }
+
   private async recoverOrphanedTasks(cfg: BridgeConfig): Promise<void> {
     const pull = await git(cfg.repoPath, ['pull', '--ff-only', '-q']);
     if (pull.code !== 0) {
@@ -1784,6 +1799,14 @@ class BridgeRunner {
         continue;
       }
       if (task?.claimed_by === this.runnerId) continue;
+      // Our runner id embeds the extension-host pid
+      // (`<hostname>-<pid>-<random>`). If that pid is gone, the claiming
+      // runner is dead — reclaim immediately even if its last heartbeat
+      // looks fresh (this is the upgrade/reload case). Otherwise fall back
+      // to heartbeat staleness so we never steal from a live runner in
+      // another window.
+      const claimedBy = typeof task?.claimed_by === 'string' ? task.claimed_by : '';
+      const runnerDead = isClaimedByDeadRunner(claimedBy, (pid) => this.isPidAlive(pid));
       // Heartbeat lives in the status file; fall back to the active file's mtime.
       let hbMs = 0;
       try {
@@ -1801,7 +1824,7 @@ class BridgeRunner {
           hbMs = 0;
         }
       }
-      if (hbMs && Date.now() - hbMs <= STALE_MS) continue; // live runner — hands off
+      if (!runnerDead && hbMs && Date.now() - hbMs <= STALE_MS) continue; // live runner — hands off
       try {
         delete task.claimed_by;
         // Prefer RESUMING the stranded Cline session (keeps its context)
