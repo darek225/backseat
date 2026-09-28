@@ -12,6 +12,32 @@ in the repo.
 | `tasks/active/`  | Watcher    | Claimed; exactly one task runs at a time  |
 | `tasks/done/`    | Watcher    | Finished (success, failure, or cancelled) |
 | `tasks/status/`  | Watcher    | Live status per task id (updated often)   |
+| `reports/`         | Muse       | Morning digests (`YYYY-MM-DD-digest.md`)  |
+| `projects.json`    | Both       | Nickname → PC path map for projects       |
+| `notify.json`      | Watcher    | ntfy.sh topic for instant task-finished pings (optional) |
+
+## Instant notifications (`notify.json`, optional)
+
+Git polling works but is slow. For near-instant completion pings, set
+`backseat.notifyTopic` in VS Code to any unguessable string (e.g.
+`backseat-9f3k7q2x`). On every task completion the extension POSTs a small
+"task finished" message to `https://ntfy.sh/<topic>` (free, no account) and
+publishes the topic here:
+
+```json
+{
+  "topic": "backseat-9f3k7q2x",
+  "events": ["task_finished"],
+  "updated_at": "2026-09-28T01:10:00Z"
+}
+```
+
+Muse's fast path: read the topic from `notify.json`, then poll
+`https://ntfy.sh/<topic>/json?since=<last-seen-id>` for new pings instead of
+blind git polling. Git remains the source of truth — a lost ping is harmless
+because the next git poll catches up. The ping payload carries only the task
+id, title, and result; never any secrets. Leave `backseat.notifyTopic` empty
+to disable; everything still works on git polling alone.
 
 File names are always `<task-id>.json`. Task ids are short, unique,
 filesystem-safe strings, e.g. `20260928-001-auth` or a short uuid hex.
@@ -76,7 +102,8 @@ from their phone. `prompt` may be empty for command tasks.
   "created_at": "2026-09-28T01:10:00Z",
 
   // Per command
-  "args": { "path": "C:\\Users\\Darek\\code\\blog", "name": "blog" },
+  "args": { "project": "blog" },      // preferred: nickname from projects.json
+  // ...or a raw path: "args": { "path": "C:\\Users\\Darek\\code\\blog", "name": "blog" }
   "title": "Open blog project",
 
   // deleteProject ONLY:
@@ -88,10 +115,17 @@ Commands:
 
 | Command         | Args             | Effect                                              |
 |----------------|------------------|-----------------------------------------------------|
-| `openProject`  | `args.path`      | Opens the folder in VS Code (current window)        |
-| `newProject`   | `args.path`, `args.name?` | Creates the folder, `git init`, stub README, opens it |
+| `openProject`  | `args.project` or `args.path` | Adds the folder as a workspace root (the bridge repo stays open, so remote control never drops); removes previously opened project roots |
+| `newProject`   | `args.path`, `args.name?` | Creates the folder, `git init`, stub README, adds it as a workspace root |
 | `closeWindow`  | —                | Publishes the done state, then closes VS Code       |
-| `deleteProject`| `args.path`, `confirm: "delete"` | **Permanently deletes** the directory |
+| `deleteProject`| `args.project` or `args.path`, `confirm: "delete"` | **Permanently deletes** the directory; also drops it from the workspace and `projects.json` |
+
+**Project nicknames:** the bridge repo's `projects.json` maps nicknames to PC
+paths (`{"blog": "C:\\Users\\Darek\\code\\blog"}`). Prefer `args.project`
+over raw paths — a nickname can't typo-delete the wrong folder. After a
+successful `openProject`/`newProject`, the extension writes the nickname →
+path mapping into `projects.json` itself, so the map stays current without
+Muse having to maintain it.
 
 **Safety rules for `deleteProject`:**
 

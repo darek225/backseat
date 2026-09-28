@@ -1,5 +1,7 @@
 # Backseat
 
+![Backseat logo](vscode-bridge/images/logo.png)
+
 **Backseat-drive your Cline coding agent from your phone.**
 
 Chat with Muse anywhere — your PC does the coding. You architect from the
@@ -18,15 +20,25 @@ Click **Use this template** at the top of this page and create a **private**
 repository. That's your personal bridge — your tasks and project paths stay
 visible only to you.
 
-**2. Send your repo to your Muse.**
-Paste your new repo link into Muse and say *"set up Backseat with this repo."*
-It reads `MUSE.md`, clones your copy, and starts watching for work. Its side
-is fully automatic from there.
+**2. Give your Muse access to the repo.**
+Your Muse needs to read and write that private repo. The simplest path: in
+your GitHub settings, create a **fine-grained personal access token** scoped
+to just that repo (contents: read + write), then paste the repo link into
+Muse and say *"set up Backseat with this repo — here's a token with access."*
+and share the token through Muse's secure flow. It reads `MUSE.md`, clones
+your copy, and starts watching for work. Its side is fully automatic from
+there.
+
+Then tell your Muse two things:
+- *"Check the bridge repo every 10 minutes and tell me when tasks finish."*
+- *"Every morning at 7, summarize last night's work into a digest."*
 
 **3. Install the VS Code plugin.**
 Download [`dist/backseat-latest.vsix`](dist/backseat-latest.vsix), then in
 VS Code: Extensions → `…` → *Install from VSIX*. Requires the Cline extension
-(signed in — your model key never leaves your PC) and Git.
+(signed in — your model key never leaves your PC) and Git. Run
+**Backseat: Run setup doctor** from the command palette — it checks every
+link in the chain and tells you what's broken.
 
 **4. Open your repo folder in VS Code.**
 That's it — Backseat auto-detects the bridge repo and starts polling. No
@@ -72,11 +84,22 @@ polling (every few minutes), so asking `status` in chat is the fast path.
   stay in Cline's own config on the PC.
 - **Private repo recommended.**
 
+## Honest limitations
+
+- **Your PC must stay on and awake**, with VS Code open on the bridge repo
+  folder. Asleep means silent — queued tasks just wait.
+- **Muse's side is polling, not instant.** It checks every few minutes; ask
+  `status` in chat for the fast path.
+- **The Cline extension API is unverified** — Backseat probes it and falls
+  back to the documented headless `cline --yolo` CLI, which is the tested path.
+- **One PC per bridge repo.** Two PCs racing the same queue is undefined behavior.
+- **Don't add collaborators you don't fully trust** — anyone with write
+  access can queue tasks that run code on your PC.
+
 ## Files
 
 - `MUSE.md` — setup brief: send the repo to any Muse and it configures itself
 - `protocol.md` — exact JSON schemas for tasks and status files
+- `CHANGELOG.md` — what's new in each release
 - `vscode-bridge/` — the VS Code extension source (TypeScript)
-- `dist/backseat-0.1.0.vsix` — packaged plugin, ready to install
-- `pc/` — legacy standalone watcher (superseded by the extension; kept as reference)
-- `agent/` — Muse-side poll script for scheduled checks
+- `dist/backseat-latest.vsix` — packaged plugin, ready to install

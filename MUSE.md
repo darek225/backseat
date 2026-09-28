@@ -24,11 +24,21 @@ No open ports. No shared API keys. GitHub is the only wire.
    knows the repo, only their PC has it cloned. Then clone their copy locally
    (you have the user's GitHub access).
 2. **Read `protocol.md`** — the exact JSON schemas for task files and status files.
-3. **Set up a recurring check** (cron): every few minutes, pull and summarize
-   `tasks/pending/`, `tasks/active/`, `tasks/done/` and `tasks/status/`.
-   `agent/muse_poller.py` prints a compact summary — run it on each tick and
-   report anything new to the user in chat. Timing is polling, not instant:
-   tell the user that asking "status" in chat is the fast path.
+3. **Set up a recurring check** (cron): every few minutes, `git pull` the
+   bridge repo and summarize `tasks/pending/`, `tasks/active/`,
+   `tasks/done/` and `tasks/status/`. Report anything new to the user in
+   chat. Timing is polling, not instant: tell the user that asking "status"
+   in chat is the fast path. The extension creates the task directories
+   itself on first run, so an empty bridge repo is fine.
+   - **Fast path (if `notify.json` exists):** the user enabled instant
+     pings. Read `topic` from `notify.json` and poll
+     `https://ntfy.sh/<topic>/json?since=<last-seen-id>` — each new ping
+     means a task just finished, so `git pull` immediately and report it.
+     Git is still the source of truth; the pings are just the doorbell.
+4. **Offer the morning digest** (cron): if the user wants overnight runs,
+   set a daily morning check that reads the last night's `tasks/done/`
+   files, writes `reports/YYYY-MM-DD-digest.md` (what shipped, what failed,
+   how to verify), and summarizes it in chat.
 4. **Tell the user you're ready**, and how to talk to you:
    - `status` — what's queued, running, done
    - `queue: <description>` — new task for Cline
@@ -80,21 +90,26 @@ task's `project_dir` comes from this map — never guess a path. The extension
 hands `project_dir` to Cline, so the user never has to touch VS Code to switch
 projects.
 
+Command tasks accept `args.project` (a nickname from `projects.json`) instead
+of a raw path — prefer the nickname; the extension resolves it. The extension
+also auto-learns: after a successful `openProject`/`newProject` it writes the
+name → path mapping into `projects.json` itself.
+
 ## Remote project control
 
 Besides Cline tasks, you can drive VS Code itself with command tasks
 (`"kind": "command"`). This is how the user opens, creates, or removes
-projects without touching the PC:
+projects without touching the PC. Opening a project adds it as a second
+workspace root — the bridge repo stays open, so remote control never drops.
 
 - `"open blog"` → queue `{kind: "command", command: "openProject",
-  args: {path: "<from projects.json>"}}`
+  args: {project: "blog"}}`
 - `"create a new project called X"` → `{kind: "command",
-  command: "newProject", args: {path: "<parent>/X", name: "X"}}`,
-  then add the path to `projects.json`.
+  command: "newProject", args: {path: "<parent>/X", name: "X"}}`
 - `"close vscode"` → `{kind: "command", command: "closeWindow"}`
   (the bridge goes quiet until VS Code reopens; queued tasks wait safely).
 - `"delete project X"` → `{kind: "command", command: "deleteProject",
-  args: {path: "<from projects.json>"}, confirm: "delete"}` —
+  args: {project: "X"}, confirm: "delete"}` —
   **always ask the user first**; never set `confirm: "delete"` on your own.
 
 Command tasks use the same pending → active → done lifecycle, so report them
