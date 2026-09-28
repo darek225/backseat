@@ -150,18 +150,3 @@ test('clineSpawnTarget: posix spawns the CLI directly, no shell', () => {
     assert.equal(t.shell, false);
   }
 });
-
-test('clineSpawnTarget: provider/model flags are passed through', () => {
-  const t = logic.clineSpawnTarget('cline', 'do it', 'win32', { provider: 'openrouter', model: 'deepseek/deepseek-chat' });
-  assert.deepEqual(t.args, ['/d', '/s', '/c', 'cline', '--yolo', '-P', 'openrouter', '-m', 'deepseek/deepseek-chat', 'do it']);
-});
-
-test('clineSpawnTarget: posix passes provider/model flags too', () => {
-  const t = logic.clineSpawnTarget('cline', 'do it', 'linux', { provider: 'deepseek', model: 'deepseek-chat' });
-  assert.deepEqual(t.args, ['--yolo', '-P', 'deepseek', '-m', 'deepseek-chat', 'do it']);
-});
-
-test('clineSpawnTarget: prompt stays the LAST argv element with flags set', () => {
-  const t = logic.clineSpawnTarget('cline', 'the prompt', 'win32', { provider: 'p', model: 'm' });
-  assert.equal(t.args[t.args.length - 1], 'the prompt');
-});

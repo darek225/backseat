@@ -30,9 +30,7 @@ import {
   bridgeRepoUrl,
   classifyError,
   clineSpawnTarget,
-  completionMarker,
   deleteProtectionReason,
-  idOf,
   mergeForgottenProject,
   mergeLearnedProject,
   readPublishedNotifyTopic,
@@ -94,10 +92,6 @@ interface BridgeConfig {
   pollIntervalSec: number;
   autoStart: boolean;
   clineCommand: string;
-  /** CLI provider id (e.g. "deepseek", "openrouter"). "" = CLI default. */
-  clineProvider: string;
-  /** CLI model id. "" = CLI default. */
-  clineModel: string;
   preferClineApi: boolean;
   defaultTimeoutSec: number;
   heartbeatSec: number;
@@ -110,14 +104,18 @@ function managedBridgeDir(): string {
 }
 
 /**
- * Best-effort shape of Cline's extension API.
- * NOT officially documented — verify against your installed Cline version.
- * (Roo Code, a Cline fork, documents startNewTask/clearTask/getTaskHistory/
- * resumeTask; Cline itself exposes createClineAPI from its exports module.)
+ * Cline's extension API surface, verified against cline 4.x
+ * (apps/vscode/src/exports/cline.d.ts). Four fire-and-forget methods —
+ * notably there is NO task-history getter and NO completion signal, so
+ * Backseat cannot reliably finish a bridge task through this API and
+ * stays on the CLI path (which shares the extension's provider settings
+ * via ~/.cline/data/settings/providers.json anyway).
  */
 interface ClineApi {
-  startNewTask?: (prompt: string, images?: string[]) => Promise<unknown>;
-  getTaskHistory?: () => Promise<unknown[]>;
+  startNewTask?: (task?: string, images?: string[]) => Promise<void>;
+  sendMessage?: (message?: string, images?: string[]) => Promise<void>;
+  pressPrimaryButton?: () => Promise<void>;
+  pressSecondaryButton?: () => Promise<void>;
   [key: string]: unknown;
 }
 
@@ -231,8 +229,6 @@ class BridgeRunner {
       pollIntervalSec: Number(c.get('pollIntervalSec') ?? 30),
       autoStart: Boolean(c.get('autoStart') ?? true),
       clineCommand: String(c.get('clineCommand') ?? 'cline'),
-      clineProvider: String(c.get('clineProvider') ?? '').trim(),
-      clineModel: String(c.get('clineModel') ?? '').trim(),
       preferClineApi: Boolean(c.get('preferClineApi') ?? true),
       defaultTimeoutSec: Number(c.get('defaultTimeoutSec') ?? 1800),
       heartbeatSec: Number(c.get('heartbeatSec') ?? 30),
@@ -1066,69 +1062,14 @@ class BridgeRunner {
       );
       return null;
     }
-    if (typeof api.getTaskHistory !== 'function') {
-      // Without a completion signal we cannot reliably finish the bridge
-      // task, so stay on the tested CLI path instead of half-driving Cline.
-      this.out.appendLine('[backseat] Cline API has no task-history/completion signal; using CLI.');
-      return null;
-    }
-
-    // Snapshot history so we can recognise the task we are about to start.
-    let beforeIds = new Set<string>();
-    try {
-      const hist = await api.getTaskHistory();
-      beforeIds = new Set(hist.map((h) => idOf(h)).filter(Boolean) as string[]);
-    } catch (e: any) {
-      this.out.appendLine(`[backseat] getTaskHistory failed: ${e?.message}; using CLI.`);
-      return null;
-    }
-
-    this.out.appendLine(`[backseat] starting Cline task via extension API: ${task.id}`);
-    await this.writeStatus(cfg, task.id, 'running', '', 'cline (extension) working');
-    await pushChanges(cfg.repoPath, `task ${task.id}: running`, this.out);
-
-    try {
-      await api.startNewTask(prompt);
-    } catch (e: any) {
-      return { result: 'failed', output: `startNewTask threw: ${e?.message ?? e}`, exitCode: 1 };
-    }
-
-    // Best-effort completion detection. Cline's history item schema is not
-    // documented; we look for common completion markers on the new entry.
-    // TODO: pin this to the installed Cline version's real schema.
-    const timeoutMs = (task.timeout_sec ?? cfg.defaultTimeoutSec) * 1000;
-    const started = Date.now();
-    let lastHeartbeat = 0;
-    while (Date.now() - started < timeoutMs) {
-      await sleep(15_000);
-      if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
-        lastHeartbeat = Date.now();
-        await this.writeStatus(cfg, task.id, 'running', '', 'cline (extension) working');
-        await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
-      }
-      try {
-        const hist = await api.getTaskHistory();        const fresh = hist.filter((h) => {
-          const id = idOf(h);
-          return id && !beforeIds.has(id);
-        });
-        for (const entry of fresh) {
-          const marker = completionMarker(entry);
-          if (marker === 'done') {
-            return { result: 'success', output: JSON.stringify(entry, null, 2).slice(0, 8000), exitCode: 0 };
-          }
-          if (marker === 'failed') {
-            return { result: 'failed', output: JSON.stringify(entry, null, 2).slice(0, 8000), exitCode: 1 };
-          }
-        }
-      } catch (e: any) {
-        this.out.appendLine(`[backseat] history poll error: ${e?.message}`);
-      }
-    }
-    return {
-      result: 'timeout',
-      output: 'Timed out waiting for Cline extension task completion. Cline may still be working in the sidebar.',
-      exitCode: 124,
-    };
+    // The verified Cline 4.x API (startNewTask/sendMessage/pressPrimaryButton/
+    // pressSecondaryButton) has no task-history getter and no completion
+    // signal, so we cannot reliably finish a bridge task through it. The CLI
+    // fallback shares the extension's provider settings
+    // (~/.cline/data/settings/providers.json), so it runs the user's own
+    // setup with no extra configuration.
+    this.out.appendLine('[backseat] Cline API has no completion signal; using CLI (shared provider settings).');
+    return null;
   }
 
   // -- Cline CLI fallback path ---------------------------------------------
@@ -1157,12 +1098,7 @@ class BridgeRunner {
       });
     }
 
-    const pm = [cfg.clineProvider ? `-P ${cfg.clineProvider}` : '', cfg.clineModel ? `-m ${cfg.clineModel}` : '']
-      .filter(Boolean)
-      .join(' ');
-    this.out.appendLine(
-      `[backseat] launching: ${cfg.clineCommand} --yolo${pm ? ' ' + pm : ''} (cwd=${projectDir})`,
-    );
+    this.out.appendLine(`[backseat] launching: ${cfg.clineCommand} --yolo (cwd=${projectDir})`);
 
     return new Promise((resolve) => {
       let output = '';
@@ -1178,10 +1114,7 @@ class BridgeRunner {
       try {
         // Spawn target is a pure function (logic.ts) so the Windows
         // cmd.exe/argv quoting is unit-testable — see clineSpawnTarget.
-        const target = clineSpawnTarget(cfg.clineCommand, prompt, process.platform, {
-          provider: cfg.clineProvider || undefined,
-          model: cfg.clineModel || undefined,
-        });
+        const target = clineSpawnTarget(cfg.clineCommand, prompt);
         child = cp.spawn(target.file, target.args, {
           cwd: projectDir,
           shell: target.shell,
@@ -1386,8 +1319,6 @@ class BridgeRunner {
       repoPath: cfg?.repoPath ?? '',
       bridgeRepo: String(c.get('bridgeRepo') ?? ''),
       notifyTopic: String(c.get('notifyTopic') ?? ''),
-      clineProvider: String(c.get('clineProvider') ?? ''),
-      clineModel: String(c.get('clineModel') ?? ''),
       pollIntervalSec: cfg?.pollIntervalSec ?? 30,
       currentTask: this.taskRunning ? this.currentTaskLabel || 'yes' : '',
       tasks: this.getTasks(),
@@ -1429,17 +1360,10 @@ class BridgeRunner {
   }
 
   /** Save setup from the dashboard and (re)connect. */
-  async saveSettings(
-    bridgeRepo: string,
-    notifyTopic: string,
-    clineProvider: string,
-    clineModel: string,
-  ): Promise<void> {
+  async saveSettings(bridgeRepo: string, notifyTopic: string): Promise<void> {
     const c = vscode.workspace.getConfiguration('backseat');
     await c.update('bridgeRepo', bridgeRepo.trim(), vscode.ConfigurationTarget.Global);
     await c.update('notifyTopic', notifyTopic.trim(), vscode.ConfigurationTarget.Global);
-    await c.update('clineProvider', clineProvider.trim(), vscode.ConfigurationTarget.Global);
-    await c.update('clineModel', clineModel.trim(), vscode.ConfigurationTarget.Global);
     await this.start();
   }
 
@@ -1574,15 +1498,34 @@ class BridgeRunner {
         );
       });
       mark(clinev.code === 0, `cline CLI ("${clineCmd}") found`, clinev.out || `not on PATH — set backseat.clineCommand`);
-      // The CLI does NOT inherit the VS Code extension's provider/model —
-      // without explicit settings it uses its own defaults, which may be
-      // slower (or bill a different account) than the user's setup.
-      const pm = [cfg.clineProvider, cfg.clineModel].filter(Boolean).join(' / ');
-      mark(
-        true,
-        'cline CLI provider/model for tasks',
-        pm || 'CLI defaults (provider "cline", model "anthropic/claude-sonnet-4.6") — set backseat.clineProvider/clineModel to match your VS Code setup',
-      );
+      // The Cline CLI and the VS Code extension share one provider-settings
+      // file (~/.cline/data/settings/providers.json), so task runs use the
+      // user's own provider/model with no Backseat configuration. Surface
+      // what that file declares so a mismatch is visible, not mysterious.
+      try {
+        const providersPath =
+          process.env.CLINE_PROVIDER_SETTINGS_PATH?.trim() ||
+          path.join(os.homedir(), '.cline', 'data', 'settings', 'providers.json');
+        if (fs.existsSync(providersPath)) {
+          const raw = JSON.parse(fs.readFileSync(providersPath, 'utf8')) as Record<string, unknown>;
+          const keys = Object.keys(raw);
+          // Never print secrets: report key names and non-secret values only.
+          const safe: string[] = [];
+          for (const k of keys.slice(0, 12)) {
+            if (/key|secret|token/i.test(k)) {
+              safe.push(`${k}=<redacted>`);
+              continue;
+            }
+            const v = raw[k];
+            safe.push(`${k}=${typeof v === 'object' ? '{…}' : String(v).slice(0, 60)}`);
+          }
+          mark(true, 'cline shared provider settings', `${providersPath} — ${safe.join(', ') || '(empty)'}`);
+        } else {
+          mark(true, 'cline shared provider settings', `no providers.json yet at ${providersPath} — run \`cline auth\` once to seed it`);
+        }
+      } catch (e: any) {
+        mark(true, 'cline shared provider settings', `could not read providers.json: ${e?.message}`);
+      }
     }
 
     const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
@@ -1591,13 +1534,10 @@ class BridgeRunner {
       try {
         const api = (await ext.activate()) as ClineApi;
         mark(typeof api?.startNewTask === 'function', 'Cline API: startNewTask');
-        mark(
-          typeof api?.getTaskHistory === 'function',
-          'Cline API: completion signal',
-          typeof api?.getTaskHistory === 'function'
-            ? ''
-            : 'missing — Backseat will use the CLI fallback (fine)',
-        );
+        // Verified: the Cline 4.x extension API has no completion signal, so
+        // Backseat always uses the CLI path (which shares the extension's
+        // provider settings — no extra configuration needed).
+        mark(true, 'Cline API: completion signal', 'none by design — CLI fallback is the intended path');
       } catch (e: any) {
         mark(false, 'Cline extension activates', e?.message ?? String(e));
       }

@@ -40,16 +40,6 @@
           "description": "Command used to invoke the Cline CLI for the fallback path (full path if not on PATH).",
           "type": "string"
         },
-        "backseat.clineProvider": {
-          "default": "",
-          "description": "Cline CLI provider id (e.g. \"openrouter\", \"deepseek\"). Empty = the CLI's own default (currently provider \"cline\"). Set this to match your VS Code Cline setup \u2014 the CLI does NOT inherit the extension's provider.",
-          "type": "string"
-        },
-        "backseat.clineModel": {
-          "default": "",
-          "description": "Cline CLI model id (e.g. \"deepseek-chat\"). Empty = the CLI's own default (currently \"anthropic/claude-sonnet-4.6\").",
-          "type": "string"
-        },
         "backseat.defaultTimeoutSec": {
           "default": 1800,
           "description": "Kill a running task after this many seconds (unless the task sets timeout_sec).",
@@ -135,6 +125,6 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.7.5",
+  "version": "0.7.6",
   "icon": "images/icon.png"
 }

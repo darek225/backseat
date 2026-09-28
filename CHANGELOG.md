@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.6
+
+- **Reverted 0.7.5's provider/model knobs**: the Cline CLI and the VS Code
+  extension share one provider-settings file
+  (`~/.cline/data/settings/providers.json`), so task runs already use the
+  user's own provider/model with zero Backseat configuration. The manual
+  `backseat.clineProvider`/`backseat.clineModel` settings are gone.
+- Verified Cline 4.x's extension API (4 methods, no completion signal), so
+  the CLI fallback is now the intended path by design — not a degraded
+  mode. The doctor says so and shows what the shared providers file
+  declares (secrets redacted).
+
 ## 0.7.5
 
 - **Cline CLI provider/model settings**: the CLI does NOT inherit the VS Code
