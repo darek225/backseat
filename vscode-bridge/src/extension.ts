@@ -373,6 +373,8 @@ class BridgeRunner {
     }
     this.out.appendLine(`[backseat] starting, repo=${cfg.repoPath} every ${cfg.pollIntervalSec}s`);
     this.setStatus('idle');
+    // Re-queue tasks stranded by a dead runner (upgrade/reload/crash).
+    await this.recoverOrphanedTasks(cfg);
     // Check immediately, then on the interval.
     void this.pollOnce();
     this.timer = setInterval(() => void this.pollOnce(), cfg.pollIntervalSec * 1000);
@@ -1628,6 +1630,71 @@ class BridgeRunner {
     await c.update('bridgeRepo', bridgeRepo.trim(), vscode.ConfigurationTarget.Global);
     await c.update('notifyTopic', notifyTopic.trim(), vscode.ConfigurationTarget.Global);
     await this.start();
+  }
+
+  /**
+   * Orphan recovery: tasks left in tasks/active/ by a dead runner (extension
+   * upgrade, window reload, crash) go back to pending so they run fresh.
+   * A task is orphaned when it is claimed by a *different* runner id and
+   * its heartbeat is older than 5 minutes — a live runner (e.g. another VS
+   * Code window) keeps heartbeating, so we never steal those.
+   */
+  private async recoverOrphanedTasks(cfg: BridgeConfig): Promise<void> {
+    const pull = await git(cfg.repoPath, ['pull', '--ff-only', '-q']);
+    if (pull.code !== 0) {
+      this.out.appendLine(`[backseat] orphan check: pull failed (${pull.out.slice(-200)}), skipping`);
+      return;
+    }
+    const activeDir = path.join(cfg.repoPath, 'tasks', 'active');
+    const pendingDir = path.join(cfg.repoPath, 'tasks', 'pending');
+    let files: string[];
+    try {
+      files = fs.readdirSync(activeDir).filter((f) => f.endsWith('.json'));
+    } catch {
+      return;
+    }
+    const STALE_MS = 5 * 60 * 1000;
+    let recovered = 0;
+    for (const f of files) {
+      const activePath = path.join(activeDir, f);
+      let task: any;
+      try {
+        task = JSON.parse(fs.readFileSync(activePath, 'utf8'));
+      } catch {
+        continue;
+      }
+      if (task?.claimed_by === this.runnerId) continue;
+      // Heartbeat lives in the status file; fall back to the active file's mtime.
+      let hbMs = 0;
+      try {
+        const st = JSON.parse(
+          fs.readFileSync(path.join(cfg.repoPath, 'tasks', 'status', f), 'utf8'),
+        );
+        if (typeof st?.heartbeat_at === 'string') hbMs = Date.parse(st.heartbeat_at);
+      } catch {
+        /* no status file */
+      }
+      if (!hbMs) {
+        try {
+          hbMs = fs.statSync(activePath).mtimeMs;
+        } catch {
+          hbMs = 0;
+        }
+      }
+      if (hbMs && Date.now() - hbMs <= STALE_MS) continue; // live runner — hands off
+      try {
+        delete task.claimed_by;
+        writeJsonAtomic(path.join(pendingDir, f), task);
+        fs.unlinkSync(activePath);
+        recovered++;
+        this.out.appendLine(`[backseat] recovered orphaned task ${task?.id ?? f} -> pending`);
+      } catch (e: any) {
+        this.out.appendLine(`[backseat] could not recover ${f}: ${e?.message ?? e}`);
+      }
+    }
+    if (recovered > 0) {
+      await pushChanges(cfg.repoPath, `recover ${recovered} orphaned task(s)`, this.out);
+    }
   }
 
   async startPolling(): Promise<void> {
