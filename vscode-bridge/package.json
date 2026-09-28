@@ -121,9 +121,10 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test test/*.test.cjs",
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.7.0",
+  "version": "0.7.1",
   "icon": "images/icon.png"
 }

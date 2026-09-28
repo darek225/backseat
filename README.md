@@ -32,29 +32,25 @@ Then tell your Muse two things:
 - *"Check the bridge repo every 10 minutes and tell me when tasks finish."*
 - *"Every morning at 7, summarize last night's work into a digest."*
 
-**Instant pings (optional, recommended).** In VS Code settings, set
-`backseat.notifyTopic` to any unguessable string (e.g. `backseat-9f3k7q2x`).
-This is machine-to-machine signaling only — no app, no account, nothing for
-you to install. With it set, your Muse's ping wakes the PC in ~1 second when
-you queue a task (instead of waiting for the next 30-second poll), and the
-PC pings back the moment a task finishes so your Muse hears about it sooner.
-
-**3. Install the VS Code plugin.**
+**3. Install the VS Code plugin and connect it — two minutes, no settings JSON.**
 Download [`dist/backseat-latest.vsix`](dist/backseat-latest.vsix), then in
 VS Code: Extensions → `…` → *Install from VSIX*. Requires the Cline extension
 (signed in — your model key never leaves your PC) and Git.
 
-**4. Point it at your repo — one setting.**
-In VS Code settings, set `backseat.bridgeRepo` to your private repo, e.g.
-`darek225/backseat-bridge`. The extension clones it into `~/.backseat/bridge`
-and manages it itself — it works in *every* VS Code window, whatever project
-you have open. No folder to open, no paths to configure.
-
 Then open the **Backseat** tab in the activity bar (the steering-wheel
-icon). The dashboard shows live status, your tasks, and a **Run setup
-doctor** button — no command palette or settings JSON needed. (The doctor
-is also available as **Backseat: Run setup doctor** from the command
-palette — it checks every link in the chain and tells you what's broken.)
+icon):
+- Type your private repo (`darek225/backseat-bridge`) and an unguessable
+  ping topic (e.g. `backseat-9f3k7q2x`) into the setup card, then hit
+  **Save & connect**. The extension clones the repo into
+  `~/.backseat/bridge` and manages it itself — it works in *every* VS Code
+  window, whatever project you have open. The ping topic is
+  machine-to-machine signaling only (no app, no account, nothing to
+  install): your Muse's ping wakes the PC in ~1 second when you queue a
+  task, and the PC pings back the moment a task finishes.
+- If the clone needs your GitHub sign-in, you'll get a one-click
+  **Run clone in terminal** button — sign in there, done.
+- Hit **Run setup doctor**: every check should read PASS. If something's
+  red, the message tells you exactly what's missing.
 
 Now chat with Muse: `status` to see what's happening, `queue: <description>`
 to send Cline work. You can also manage projects by texting:

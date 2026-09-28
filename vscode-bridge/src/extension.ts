@@ -75,6 +75,7 @@ interface BridgeTask {
   args?: { path?: string; name?: string; project?: string };
   confirm?: string; // deleteProject requires confirm: "delete"
   max_retries?: number; // retries for transient failures (default 2)
+  claimed_by?: string; // written by this extension on claim: unique runner id
   attempts?: number; // written by this extension: total Cline attempts
   error_kind?: ErrorKind; // written by this extension on failure
   // written by this extension on completion (tasks/done/)
@@ -189,6 +190,12 @@ class BridgeRunner {
   private statusBar: vscode.StatusBarItem;
   private currentTaskLabel = '';
   private lastPushAt = 0;
+  /**
+   * Unique id for this extension-host process. Stamped into every claim as
+   * `claimed_by` so that when two runners race for the same task, the loser
+   * can tell the winner's claim from its own after a rejected push.
+   */
+  private readonly runnerId = `${os.hostname()}-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
   /** Heartbeats push at most this often — a commit every 30s all night is noise. */
   private static readonly PUSH_THROTTLE_MS = 120_000;
 
@@ -522,10 +529,27 @@ class BridgeRunner {
     this.statusBar.show();
   }
 
-  /** One poll cycle: pull, claim the oldest pending task, run it, report back. */
+  /** Timer-driven poll cycle (no-op unless polling is running). */
   async pollOnce(): Promise<void> {
+    if (!this.isRunning) {
+      return;
+    }
+    await this.doPoll();
+  }
+
+  /** Manual "check now": one full poll cycle even while the timer is stopped. */
+  async checkNow(): Promise<void> {
+    if (!this.config) {
+      this.setStatus('error', 'set your bridge repo first');
+      return;
+    }
+    await this.doPoll();
+  }
+
+  /** One poll cycle: pull, claim the oldest pending task, run it, report back. */
+  private async doPoll(): Promise<void> {
     const cfg = this.config;
-    if (!cfg || !this.isRunning || this.taskRunning) {
+    if (!cfg || this.taskRunning) {
       return;
     }
     // Both sides commit to this repo (Muse queues tasks, we push heartbeats),
@@ -592,6 +616,8 @@ class BridgeRunner {
     try {
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       fs.renameSync(src, dst); // local claim
+      task.claimed_by = this.runnerId;
+      writeJsonAtomic(dst, task); // the stamp travels with the pushed claim
     } catch (e: any) {
       this.out.appendLine(`[backseat] could not claim ${task.id}: ${e?.message}`);
       return undefined;
@@ -602,25 +628,93 @@ class BridgeRunner {
     return task;
   }
 
+  /** Upstream ref of the bridge clone's current branch (e.g. "origin/main"). */
+  private async upstreamRef(repoPath: string): Promise<string | undefined> {
+    const r = await git(repoPath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+    if (r.code !== 0) {
+      return undefined;
+    }
+    const ref = r.out.trim().split('\n')[0].trim();
+    return ref && ref !== '@{u}' ? ref : undefined;
+  }
+
+  /** Read a JSON file as it exists on the given ref, without touching the working tree. */
+  private async readRefJson(repoPath: string, ref: string, relPath: string): Promise<any | undefined> {
+    const r = await git(repoPath, ['show', `${ref}:${relPath}`]);
+    if (r.code !== 0) {
+      return undefined;
+    }
+    try {
+      return JSON.parse(r.out);
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Publish the local claim (the distributed lock). Returns false when the
    * claim was lost to another runner (caller should stop).
+   *
+   * The push is the arbiter: whoever's push lands first wins. On a rejected
+   * push we fetch and read the winner's `claimed_by` stamp. (The old code
+   * only checked that *a* claim file exists, which can't tell our claim from
+   * theirs — so both runners ran the task.)
    */
   private async publishClaim(cfg: BridgeConfig, task: BridgeTask): Promise<boolean> {
-    const claimed = await pushChanges(cfg.repoPath, `claim task ${task.id}`, this.out);
-    if (!claimed) {
-      // Re-sync: did someone else claim it first?
-      await git(cfg.repoPath, ['pull', '--rebase']);
-      const stillOurs = fs.existsSync(path.join(cfg.repoPath, 'tasks', 'active', `${task.id}.json`));
-      if (!stillOurs) {
-        this.out.appendLine(`[backseat] claim lost for ${task.id} (taken by another runner)`);
-        return false;
-      }
-      // Otherwise the push failed for a transient reason; the local move
-      // stands and the next push will carry it. Continue.
-      this.out.appendLine(`[backseat] claim push failed transiently for ${task.id}; continuing`);
+    if (await pushChanges(cfg.repoPath, `claim task ${task.id}`, this.out)) {
+      return true;
     }
-    return true;
+    // Push rejected. Fetch and see who actually holds the claim.
+    await git(cfg.repoPath, ['fetch', 'origin']);
+    const upstream = await this.upstreamRef(cfg.repoPath);
+    const winner = upstream
+      ? await this.readRefJson(cfg.repoPath, upstream, `tasks/active/${task.id}.json`)
+      : undefined;
+    const winnerId = typeof winner?.claimed_by === 'string' ? winner.claimed_by : '';
+    if (!winnerId) {
+      // Nobody holds the claim on origin — the push failed for a transient
+      // reason (network/auth). The local move stands and the next push will
+      // carry it. Continue.
+      this.out.appendLine(`[backseat] claim push failed transiently for ${task.id}; continuing`);
+      return true;
+    }
+    if (winnerId === this.runnerId) {
+      // Our push actually landed despite the error report. Continue.
+      return true;
+    }
+    // Lost the race. Uncommit ONLY our claim (it is always the tip here —
+    // single-threaded poll loop), point these two paths at the winner's
+    // state, and commit that as a sync commit. The sync commit's tree matches
+    // origin exactly, so the next pull --rebase drops it as empty and any
+    // older unpushed work (heartbeats, finished-task results) rebases cleanly.
+    this.out.appendLine(`[backseat] claim lost for ${task.id} (held by ${winnerId})`);
+    const tip = await git(cfg.repoPath, ['log', '-1', '--format=%s']);
+    if (tip.code === 0 && tip.out.trim().startsWith(`claim task ${task.id}`)) {
+      await git(cfg.repoPath, ['reset', '--soft', 'HEAD~1']);
+      const w = await git(cfg.repoPath, ['show', `${upstream}:tasks/active/${task.id}.json`]);
+      let winnerJson = '';
+      try {
+        winnerJson = JSON.parse(w.out);
+      } catch {
+        winnerJson = '';
+      }
+      if (w.code === 0 && winnerJson) {
+        // pending/<id>.json stays deleted (staged) — origin doesn't have it
+        // either. active/<id>.json becomes the winner's version.
+        fs.writeFileSync(
+          path.join(cfg.repoPath, 'tasks', 'active', `${task.id}.json`),
+          JSON.stringify(winnerJson, null, 2),
+          'utf8',
+        );
+        await git(cfg.repoPath, ['add', '--', `tasks/active/${task.id}.json`]);
+        await git(cfg.repoPath, ['commit', '-m', `backseat: drop losing claim for ${task.id} (held by ${winnerId})`]);
+      } else {
+        this.out.appendLine(`[backseat] WARNING: could not read winner's claim; leaving uncommitted for manual review`);
+      }
+    } else {
+      this.out.appendLine(`[backseat] WARNING: claim commit is not the tip; leaving working tree for manual review`);
+    }
+    return false;
   }
 
   /** Map a CLI run's outcome to an ErrorKind for the retry policy. */
@@ -1331,7 +1425,11 @@ class BridgeRunner {
    * Setup self-check: verifies every link in the chain (repo, git auth,
    * cline CLI, Cline extension + API) and prints a pasteable report.
    */
-  async doctor(): Promise<string[]> {
+  /**
+   * Run every setup check and return the report lines. No UI side effects —
+   * safe to call from the sidebar dashboard.
+   */
+  async collectDoctorReport(): Promise<string[]> {
     const ver = this.ctx.extension.packageJSON.version ?? '?';
     const lines: string[] = [`Backseat doctor v${ver}`];
     const mark = (good: boolean, label: string, detail = '') =>
@@ -1439,6 +1537,16 @@ class BridgeRunner {
       }
     }
 
+    return lines;
+  }
+
+  /**
+   * The `backseat.doctor` command: collect the report, then show it in the
+   * Output panel with a summary notification. The sidebar dashboard calls
+   * collectDoctorReport() directly so results render inside the tab.
+   */
+  async doctor(): Promise<string[]> {
+    const lines = await this.collectDoctorReport();
     this.out.show();
     this.out.appendLine('[backseat] ' + lines.join('\n[backseat] '));
     const fails = lines.filter((l) => l.startsWith('FAIL')).length;

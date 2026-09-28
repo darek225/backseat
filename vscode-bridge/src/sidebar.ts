@@ -34,8 +34,8 @@ export interface DashboardBackend {
   getDashboardState(): DashboardState;
   onDidChangeState: vscode.Event<void>;
   saveSettings(bridgeRepo: string, notifyTopic: string): Promise<void>;
-  doctor(): Promise<string[]>;
-  pollOnce(): Promise<void>;
+  collectDoctorReport(): Promise<string[]>;
+  checkNow(): Promise<void>;
   startPolling(): Promise<void>;
   stopPolling(): void;
 }
@@ -68,13 +68,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           this.pushState();
           break;
         case 'runDoctor': {
-          const lines = await this.backend.doctor();
+          const lines = await this.backend.collectDoctorReport();
           this.view?.webview.postMessage({ type: 'doctor', lines });
           this.pushState();
           break;
         }
         case 'pollNow':
-          await this.backend.pollOnce();
+          await this.backend.checkNow();
           this.pushState();
           break;
         case 'toggle':
@@ -109,11 +109,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private html(): string {
     // Note: plain string concat would be unreadable; the template literal
     // below contains no backticks, so it's safe.
+    const nonce = getNonce();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
   body {
     font-family: var(--vscode-font-family);
@@ -217,7 +219,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <div id="tasks"><div class="hint">No tasks yet.</div></div>
   </div>
 
-<script>
+<script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   let S = null;
 
@@ -280,4 +282,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+/** Random nonce for the webview Content-Security-Policy (VS Code blocks
+ *  inline scripts without one). */
+function getNonce(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  for (let i = 0; i < 32; i++) {
+    out += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return out;
 }
