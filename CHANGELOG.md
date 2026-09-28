@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.3] - 2026-09-28
+### Fixed
+- The transcript-aware auto-retry never fired: `transcriptText` only
+  understood Anthropic-style `{role, content}` messages, but the Cline SDK
+  persists `ClineMessage`-shaped rows (`{type:'say'|'ask', say/ask, text}`),
+  so provider errors (`ask:'api_req_failed'`) were invisible and the error
+  regex never matched. The reader now handles both shapes, and the error
+  regex explicitly matches `api_req_failed` and `invalid_request`.
+  Moved `transcriptText` + the regex into logic.ts (pure, unit-tested):
+  31/31 tests pass, including a regression test with a realistic
+  `api_req_failed` transcript.
 ## [0.9.2] - 2026-09-28
 ### Fixed
 - Orphan recovery now RESUMES the stranded Cline session instead of

@@ -268,3 +268,55 @@ export function bridgeRepoUrl(repo: string): string | undefined {
   }
   return undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Cline session transcript reading (session store: ~/.cline/data/sessions/)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pull readable text out of Cline's persisted session messages.
+ * Handles BOTH shapes: ClineMessage ({type:'say'|'ask', say/ask, text} —
+ * this is what the SDK persists, including ask:'api_req_failed' error
+ * payloads) and Anthropic-style ({role, content:[...]}).
+ */
+export function transcriptText(messagesPath: string, maxChars: number): string {
+  try {
+    const raw = fs.readFileSync(messagesPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const messages = Array.isArray(parsed) ? parsed : (parsed as any)?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+    const chunks: string[] = [];
+    for (const m of messages.slice(-8)) {
+      const anyM = m as any;
+      if (typeof anyM?.text === 'string' && anyM.text.trim()) {
+        const kind = anyM?.say || anyM?.ask || anyM?.type || 'msg';
+        chunks.push(`${kind}: ${anyM.text.trim()}`.slice(0, 1200));
+        continue;
+      }
+      const role = typeof anyM?.role === 'string' ? anyM.role : '';
+      const content = anyM?.content;
+      const blocks = Array.isArray(content)
+        ? content
+        : typeof content === 'string'
+          ? [{ type: 'text', text: content }]
+          : [];
+      for (const b of blocks) {
+        if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+          chunks.push(`${role}: ${b.text.trim()}`.slice(0, 1200));
+        } else if (b && b.type === 'tool_use' && typeof b.name === 'string') {
+          chunks.push(`${role} using tool: ${b.name}`);
+        }
+      }
+    }
+    return chunks.join('\n').slice(-maxChars);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Matches a provider/agent error visible in a transcript tail —
+ * including the ask:'api_req_failed' marker Cline persists on errors.
+ */
+export const TRANSCRIPT_ERROR_RE =
+  /api_req_failed|api[ _-]?req[ _-]?failed|rejected the request|request failed|rate.?limit|\b429\b|\b401\b|\b5\d\d\b|insufficient[ _-]?credits|quota|invalid_request/i;
