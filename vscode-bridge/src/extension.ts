@@ -1,5 +1,5 @@
 /**
- * Muse <-> Cline Bridge — VS Code extension (PC side).
+ * Backseat — VS Code extension (PC side).
  *
  * Instead of an always-on background script, the bridge lives inside VS Code:
  * while VS Code is open it polls the private bridge GitHub repo for pending
@@ -122,7 +122,7 @@ async function pushChanges(
 ): Promise<boolean> {
   let r = await git(repoDir, ['add', '-A']);
   if (r.code !== 0) {
-    out.appendLine(`[bridge] git add failed: ${r.out.slice(-300)}`);
+    out.appendLine(`[backseat] git add failed: ${r.out.slice(-300)}`);
     return false;
   }
   r = await git(repoDir, ['commit', '-m', message]);
@@ -130,12 +130,12 @@ async function pushChanges(
     if (/nothing to commit/i.test(r.out)) {
       return true; // nothing changed — treat as success
     }
-    out.appendLine(`[bridge] git commit failed: ${r.out.slice(-300)}`);
+    out.appendLine(`[backseat] git commit failed: ${r.out.slice(-300)}`);
     return false;
   }
   r = await git(repoDir, ['push']);
   if (r.code !== 0) {
-    out.appendLine(`[bridge] git push failed (will retry next cycle): ${r.out.slice(-500)}`);
+    out.appendLine(`[backseat] git push failed (will retry next cycle): ${r.out.slice(-500)}`);
     return false;
   }
   return true;
@@ -155,13 +155,27 @@ class BridgeRunner {
 
   constructor(private out: vscode.OutputChannel, private ctx: vscode.ExtensionContext) {
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    this.statusBar.command = 'museBridge.showStatus';
+    this.statusBar.command = 'backseat.showStatus';
     ctx.subscriptions.push(this.statusBar);
   }
 
   get config(): BridgeConfig | undefined {
-    const c = vscode.workspace.getConfiguration('museBridge');
-    const repoPath = String(c.get('repoPath') ?? '').trim();
+    const c = vscode.workspace.getConfiguration('backseat');
+    let repoPath = String(c.get('repoPath') ?? '').trim();
+    if (!repoPath) {
+      // Zero-config: if an open workspace folder looks like the bridge repo,
+      // just use it — no settings needed.
+      const folders = vscode.workspace.workspaceFolders ?? [];
+      const found = folders.find(
+        (f) =>
+          fs.existsSync(path.join(f.uri.fsPath, 'tasks', 'pending')) &&
+          fs.existsSync(path.join(f.uri.fsPath, 'protocol.md')),
+      );
+      if (found) {
+        repoPath = found.uri.fsPath;
+        this.out.appendLine(`[backseat] auto-detected bridge repo: ${repoPath}`);
+      }
+    }
     if (!repoPath) {
       return undefined;
     }
@@ -181,15 +195,15 @@ class BridgeRunner {
     const cfg = this.config;
     if (!cfg) {
       vscode.window.showWarningMessage(
-        'Muse Bridge: set "museBridge.repoPath" to your bridge repo clone first.',
+        'Backseat: open your bridge repo folder in VS Code (or set "backseat.repoPath") to start.',
       );
       return;
     }
     if (!fs.existsSync(path.join(cfg.repoPath, '.git'))) {
-      vscode.window.showErrorMessage(`Muse Bridge: not a git repo: ${cfg.repoPath}`);
+      vscode.window.showErrorMessage(`Backseat: not a git repo: ${cfg.repoPath}`);
       return;
     }
-    this.out.appendLine(`[bridge] starting, repo=${cfg.repoPath} every ${cfg.pollIntervalSec}s`);
+    this.out.appendLine(`[backseat] starting, repo=${cfg.repoPath} every ${cfg.pollIntervalSec}s`);
     this.setStatus('idle');
     // Check immediately, then on the interval.
     void this.pollOnce();
@@ -202,7 +216,7 @@ class BridgeRunner {
       this.timer = undefined;
     }
     this.setStatus('stopped');
-    this.out.appendLine('[bridge] stopped');
+    this.out.appendLine('[backseat] stopped');
   }
 
   get isRunning(): boolean {
@@ -211,10 +225,10 @@ class BridgeRunner {
 
   private setStatus(kind: 'idle' | 'stopped' | 'working' | 'error', detail = ''): void {
     const icons: Record<string, string> = {
-      idle: '$(check) Bridge: idle',
-      stopped: '$(circle-slash) Bridge: off',
-      working: '$(sync~spin) Bridge: working',
-      error: '$(warning) Bridge: error',
+      idle: '$(check) Backseat: idle',
+      stopped: '$(circle-slash) Backseat: off',
+      working: '$(sync~spin) Backseat: working',
+      error: '$(warning) Backseat: error',
     };
     this.statusBar.text = detail ? `${icons[kind]} ${detail}` : icons[kind];
     this.statusBar.tooltip = 'Muse ↔ Cline bridge — click for status';
@@ -229,7 +243,7 @@ class BridgeRunner {
     }
     const pull = await git(cfg.repoPath, ['pull', '--ff-only']);
     if (pull.code !== 0) {
-      this.out.appendLine(`[bridge] pull failed: ${pull.out.slice(-300)}`);
+      this.out.appendLine(`[backseat] pull failed: ${pull.out.slice(-300)}`);
       this.setStatus('error', 'pull failed');
       return;
     }
@@ -255,7 +269,7 @@ class BridgeRunner {
     try {
       await this.executeTask(cfg, task);
     } catch (e: any) {
-      this.out.appendLine(`[bridge] unexpected error running ${task.id}: ${e?.stack ?? e}`);
+      this.out.appendLine(`[backseat] unexpected error running ${task.id}: ${e?.stack ?? e}`);
       await this.finishTask(cfg, task, 'failed', `runner error: ${e?.message ?? e}`, 1);
     } finally {
       this.taskRunning = false;
@@ -276,7 +290,7 @@ class BridgeRunner {
     try {
       task = readJson(src) as BridgeTask;
     } catch (e: any) {
-      this.out.appendLine(`[bridge] skipping unreadable task ${filename}: ${e?.message}`);
+      this.out.appendLine(`[backseat] skipping unreadable task ${filename}: ${e?.message}`);
       return undefined;
     }
     task.id = task.id || filename.replace(/\.json$/, '');
@@ -285,7 +299,7 @@ class BridgeRunner {
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       fs.renameSync(src, dst); // local claim
     } catch (e: any) {
-      this.out.appendLine(`[bridge] could not claim ${task.id}: ${e?.message}`);
+      this.out.appendLine(`[backseat] could not claim ${task.id}: ${e?.message}`);
       return undefined;
     }
 
@@ -296,7 +310,7 @@ class BridgeRunner {
 
   private async executeTask(cfg: BridgeConfig, task: BridgeTask): Promise<void> {
     this.setStatus('working', task.title || task.id);
-    this.out.appendLine(`[bridge] claimed task ${task.id}: ${task.title ?? '(no title)'}`);
+    this.out.appendLine(`[backseat] claimed task ${task.id}: ${task.title ?? '(no title)'}`);
     this.tree?.refresh();
 
     // Publish the claim (the distributed lock) before doing any work.
@@ -306,12 +320,12 @@ class BridgeRunner {
       await git(cfg.repoPath, ['pull', '--ff-only']);
       const stillOurs = fs.existsSync(path.join(cfg.repoPath, 'tasks', 'active', `${task.id}.json`));
       if (!stillOurs) {
-        this.out.appendLine(`[bridge] claim lost for ${task.id} (taken by another runner)`);
+        this.out.appendLine(`[backseat] claim lost for ${task.id} (taken by another runner)`);
         return;
       }
       // Otherwise the push failed for a transient reason; the local move
       // stands and the next push will carry it. Continue.
-      this.out.appendLine(`[bridge] claim push failed transiently for ${task.id}; continuing`);
+      this.out.appendLine(`[backseat] claim push failed transiently for ${task.id}; continuing`);
     }
 
     task.started_at = utcnow();
@@ -328,7 +342,7 @@ class BridgeRunner {
       if (viaApi) {
         ({ result, output, exitCode } = viaApi);
       } else {
-        this.out.appendLine('[bridge] Cline API path unavailable — falling back to Cline CLI.');
+        this.out.appendLine('[backseat] Cline API path unavailable — falling back to Cline CLI.');
         ({ result, output, exitCode } = await this.runViaCli(cfg, task));
       }
     } else {
@@ -336,7 +350,7 @@ class BridgeRunner {
     }
 
     this.out.appendLine(
-      `[bridge] task ${task.id} finished: ${result} (exit ${exitCode}, ${Math.round((Date.now() - startedAt) / 1000)}s)`,
+      `[backseat] task ${task.id} finished: ${result} (exit ${exitCode}, ${Math.round((Date.now() - startedAt) / 1000)}s)`,
     );
     await this.finishTask(cfg, task, result, output, exitCode);
   }
@@ -357,26 +371,26 @@ class BridgeRunner {
   ): Promise<{ result: TaskState; output: string; exitCode: number } | null> {
     const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
     if (!ext) {
-      this.out.appendLine('[bridge] Cline extension not installed/active.');
+      this.out.appendLine('[backseat] Cline extension not installed/active.');
       return null;
     }
     let api: ClineApi;
     try {
       api = (await ext.activate()) as ClineApi;
     } catch (e: any) {
-      this.out.appendLine(`[bridge] could not activate Cline extension: ${e?.message}`);
+      this.out.appendLine(`[backseat] could not activate Cline extension: ${e?.message}`);
       return null;
     }
     if (typeof api?.startNewTask !== 'function') {
       this.out.appendLine(
-        `[bridge] Cline API has no startNewTask (exports: ${Object.keys(api ?? {}).join(', ') || 'none'}).`,
+        `[backseat] Cline API has no startNewTask (exports: ${Object.keys(api ?? {}).join(', ') || 'none'}).`,
       );
       return null;
     }
     if (typeof api.getTaskHistory !== 'function') {
       // Without a completion signal we cannot reliably finish the bridge
       // task, so stay on the tested CLI path instead of half-driving Cline.
-      this.out.appendLine('[bridge] Cline API has no task-history/completion signal; using CLI.');
+      this.out.appendLine('[backseat] Cline API has no task-history/completion signal; using CLI.');
       return null;
     }
 
@@ -386,11 +400,11 @@ class BridgeRunner {
       const hist = await api.getTaskHistory();
       beforeIds = new Set(hist.map((h) => idOf(h)).filter(Boolean) as string[]);
     } catch (e: any) {
-      this.out.appendLine(`[bridge] getTaskHistory failed: ${e?.message}; using CLI.`);
+      this.out.appendLine(`[backseat] getTaskHistory failed: ${e?.message}; using CLI.`);
       return null;
     }
 
-    this.out.appendLine(`[bridge] starting Cline task via extension API: ${task.id}`);
+    this.out.appendLine(`[backseat] starting Cline task via extension API: ${task.id}`);
     await this.writeStatus(cfg, task.id, 'running', '', 'cline (extension) working');
     await pushChanges(cfg.repoPath, `task ${task.id}: running`, this.out);
 
@@ -429,7 +443,7 @@ class BridgeRunner {
           }
         }
       } catch (e: any) {
-        this.out.appendLine(`[bridge] history poll error: ${e?.message}`);
+        this.out.appendLine(`[backseat] history poll error: ${e?.message}`);
       }
     }
     return {
@@ -464,7 +478,7 @@ class BridgeRunner {
       });
     }
 
-    this.out.appendLine(`[bridge] launching: ${cfg.clineCommand} --yolo (cwd=${projectDir})`);
+    this.out.appendLine(`[backseat] launching: ${cfg.clineCommand} --yolo (cwd=${projectDir})`);
 
     return new Promise((resolve) => {
       let output = '';
@@ -503,7 +517,7 @@ class BridgeRunner {
         clearTimeout(killer);
         done({
           result: 'failed',
-          output: `cline not found (tried '${cfg.clineCommand}'). Set museBridge.clineCommand to the full path.\n${err.message}`,
+          output: `cline not found (tried '${cfg.clineCommand}'). Set backseat.clineCommand to the full path.\n${err.message}`,
           exitCode: 127,
         });
       });
@@ -566,7 +580,7 @@ class BridgeRunner {
       }
       writeJsonAtomic(donePath, task);
     } catch (e: any) {
-      this.out.appendLine(`[bridge] could not move task file for ${task.id}: ${e?.message}`);
+      this.out.appendLine(`[backseat] could not move task file for ${task.id}: ${e?.message}`);
     }
 
     await this.writeStatus(cfg, task.id, result, tailLines(output), `finished: ${result} (exit ${exitCode})`);
@@ -593,7 +607,7 @@ class BridgeRunner {
   showStatus(): void {
     const cfg = this.config;
     const lines = [
-      `Bridge: ${this.isRunning ? 'polling' : 'stopped'}`,
+      `Backseat: ${this.isRunning ? 'polling' : 'stopped'}`,
       `Repo: ${cfg?.repoPath ?? '(not configured)'}`,
       `Task in flight: ${this.taskRunning ? this.currentTaskLabel || 'yes' : 'none'}`,
     ];
@@ -610,7 +624,7 @@ class BridgeRunner {
       }
     }
     this.out.show();
-    this.out.appendLine('[bridge] ' + lines.join(' | '));
+    this.out.appendLine('[backseat] ' + lines.join(' | '));
     vscode.window.showInformationMessage(lines.join('\n'));
   }
 }
@@ -729,22 +743,22 @@ class TaskTreeProvider implements vscode.TreeDataProvider<TaskTreeItem> {
 // ---------------------------------------------------------------------------
 
 export function activate(context: vscode.ExtensionContext): void {
-  const out = vscode.window.createOutputChannel('Muse Bridge');
+  const out = vscode.window.createOutputChannel('Backseat');
   context.subscriptions.push(out);
 
   const runner = new BridgeRunner(out, context);
   const tree = new TaskTreeProvider(runner);
   runner.tree = tree;
-  context.subscriptions.push(vscode.window.registerTreeDataProvider('museBridge.tasks', tree));
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('backseat.tasks', tree));
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('museBridge.start', () => {
+    vscode.commands.registerCommand('backseat.start', () => {
       runner.start();
       out.show();
     }),
-    vscode.commands.registerCommand('museBridge.stop', () => runner.stop()),
-    vscode.commands.registerCommand('museBridge.runOnce', () => void runner.pollOnce()),
-    vscode.commands.registerCommand('museBridge.showStatus', () => runner.showStatus()),
+    vscode.commands.registerCommand('backseat.stop', () => runner.stop()),
+    vscode.commands.registerCommand('backseat.runOnce', () => void runner.pollOnce()),
+    vscode.commands.registerCommand('backseat.showStatus', () => runner.showStatus()),
   );
 
   // Refresh the tree whenever the repo changes on disk (e.g. after git pull).
@@ -767,10 +781,10 @@ export function activate(context: vscode.ExtensionContext): void {
   if (runner.config?.autoStart) {
     runner.start();
   } else if (!runner.config) {
-    out.appendLine('[bridge] set "museBridge.repoPath" to enable polling.');
+    out.appendLine('[backseat] set "backseat.repoPath" to enable polling.');
   }
 
-  out.appendLine('[bridge] extension activated');
+  out.appendLine('[backseat] extension activated');
 }
 
 export function deactivate(): void {
