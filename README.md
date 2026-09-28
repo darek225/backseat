@@ -13,22 +13,39 @@ you (phone) ──chat──▶ Muse (architect) ──git──▶ Backseat ext
 
 ## Instant setup
 
-**1. Send this repo to your Muse.**
-Paste the repo link into Muse and say *"set up Backseat with this repo."*
-It reads `MUSE.md`, clones the repo, and starts watching for work. Its side
+**1. Create your private copy.**
+Click **Use this template** at the top of this page and create a **private**
+repository. That's your personal bridge — your tasks and project paths stay
+visible only to you.
+
+**2. Send your repo to your Muse.**
+Paste your new repo link into Muse and say *"set up Backseat with this repo."*
+It reads `MUSE.md`, clones your copy, and starts watching for work. Its side
 is fully automatic from there.
 
-**2. Install the VS Code plugin.**
+**3. Install the VS Code plugin.**
 Download [`dist/backseat-0.1.0.vsix`](dist/backseat-0.1.0.vsix), then in
 VS Code: Extensions → `…` → *Install from VSIX*. Requires the Cline extension
-(signed in — your DeepSeek key never leaves your PC) and Git.
+(signed in — your model key never leaves your PC) and Git.
 
-**3. Open this repo folder in VS Code.**
+**4. Open your repo folder in VS Code.**
 That's it — Backseat auto-detects the bridge repo and starts polling. No
 settings, no terminal windows, no always-on scripts. Close VS Code and it's off.
 
 Now chat with Muse: `status` to see what's happening, `queue: <description>`
 to send Cline work.
+
+## How your Muse finds your Cline (and nobody else's)
+
+There's no account system and no central server. The pairing **is** your
+private repo copy:
+
+- Only **your** Muse knows your repo — you gave it the link.
+- Only **your** PC has that repo cloned with your Git credentials.
+- Only **your** VS Code runs the Backseat extension against that clone.
+
+Nobody else's Muse can see your repo, so nobody else's tasks can reach your
+PC. One private copy per person keeps every bridge separate by construction.
 
 ## How it works
 

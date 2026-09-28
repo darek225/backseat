@@ -16,7 +16,13 @@ No open ports. No shared API keys. GitHub is the only wire.
 
 ## Your setup (do all of this now, without being asked twice)
 
-1. **Clone this repo** locally (you have the user's GitHub access).
+1. **Get the user's private copy.** If the user sent you the public Backseat
+   repo rather than their own copy, create a private copy for them first
+   (fork it, or "Use this template" into a new private repo under their
+   account). That private copy is their personal bridge channel — it's also
+   what pairs their Muse to their Cline and nobody else's: only this Muse
+   knows the repo, only their PC has it cloned. Then clone their copy locally
+   (you have the user's GitHub access).
 2. **Read `protocol.md`** — the exact JSON schemas for task files and status files.
 3. **Set up a recurring check** (cron): every few minutes, pull and summarize
    `tasks/pending/`, `tasks/active/`, `tasks/done/` and `tasks/status/`.
