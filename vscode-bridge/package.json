@@ -79,10 +79,24 @@
       "title": "Backseat"
     },
     "views": {
-      "explorer": [
+      "backseat": [
+        {
+          "id": "backseat.dashboard",
+          "name": "Dashboard",
+          "type": "webview"
+        },
         {
           "id": "backseat.tasks",
-          "name": "Backseat Tasks"
+          "name": "Tasks"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "backseat",
+          "title": "Backseat",
+          "icon": "images/icon.png"
         }
       ]
     }
@@ -110,6 +124,6 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.6.2",
+  "version": "0.7.0",
   "icon": "images/icon.png"
 }

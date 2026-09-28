@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Sidebar dashboard tab**: Backseat now has its own activity-bar tab (the
+  steering-wheel icon) — live status, bridge-repo + ping-topic setup with a
+  Save & connect button, Start/Stop/Check-now actions, the task queues, and
+  the setup doctor with readable pass/fail results. No more settings JSON
+  or Output-panel log diving for normal use.
+- **Muse-side token rule**: `MUSE.md` now instructs the Muse to do all
+  GitHub work headless via `git`/`gh` CLI — never open github.com in a
+  browser to check the bridge.
+
+
+## 0.6.2
+
 - **Setup hardening**: if the auto-clone fails (usually the GitHub sign-in,
   which the extension can't do itself), you now get a "Run clone in terminal"
   button that opens a terminal with the exact `git clone` command ready —
