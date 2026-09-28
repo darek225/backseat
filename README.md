@@ -24,7 +24,7 @@ It reads `MUSE.md`, clones your copy, and starts watching for work. Its side
 is fully automatic from there.
 
 **3. Install the VS Code plugin.**
-Download [`dist/backseat-0.1.0.vsix`](dist/backseat-0.1.0.vsix), then in
+Download [`dist/backseat-latest.vsix`](dist/backseat-latest.vsix), then in
 VS Code: Extensions → `…` → *Install from VSIX*. Requires the Cline extension
 (signed in — your model key never leaves your PC) and Git.
 
@@ -33,7 +33,10 @@ That's it — Backseat auto-detects the bridge repo and starts polling. No
 settings, no terminal windows, no always-on scripts. Close VS Code and it's off.
 
 Now chat with Muse: `status` to see what's happening, `queue: <description>`
-to send Cline work.
+to send Cline work. You can also manage projects by texting:
+`open my blog`, `create a new project called X`, `close vscode`.
+Hand Muse a big plan in the evening and it will break it into tasks,
+work the queue overnight, and leave a digest in the morning.
 
 ## How your Muse finds your Cline (and nobody else's)
 

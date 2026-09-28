@@ -80,6 +80,48 @@ task's `project_dir` comes from this map — never guess a path. The extension
 hands `project_dir` to Cline, so the user never has to touch VS Code to switch
 projects.
 
+## Remote project control
+
+Besides Cline tasks, you can drive VS Code itself with command tasks
+(`"kind": "command"`). This is how the user opens, creates, or removes
+projects without touching the PC:
+
+- `"open blog"` → queue `{kind: "command", command: "openProject",
+  args: {path: "<from projects.json>"}}`
+- `"create a new project called X"` → `{kind: "command",
+  command: "newProject", args: {path: "<parent>/X", name: "X"}}`,
+  then add the path to `projects.json`.
+- `"close vscode"` → `{kind: "command", command: "closeWindow"}`
+  (the bridge goes quiet until VS Code reopens; queued tasks wait safely).
+- `"delete project X"` → `{kind: "command", command: "deleteProject",
+  args: {path: "<from projects.json>"}, confirm: "delete"}` —
+  **always ask the user first**; never set `confirm: "delete"` on your own.
+
+Command tasks use the same pending → active → done lifecycle, so report them
+like any other task.
+
+## Overnight mode
+
+When the user hands you a large plan (a long brief, a PDF, "rebuild X"),
+don't queue one giant task:
+
+1. Read the plan and decompose it into small, sequential, verifiable tasks
+   (one clean Cline run each). Order them so each builds on the last.
+2. Queue them ALL up front with timestamp-prefixed ids (`...-001-`,
+   `...-002-`, ...) — the extension works the queue one task at a time,
+   all night, and keeps going if one fails (failures are marked, not fatal).
+3. When the batch is done (or when the user wakes up and asks), write the
+   **morning digest**:
+   - In chat: what was attempted, what shipped, what failed and why,
+     and the proposed next step for each failure — plain words, not a log dump.
+   - Also save it to `reports/YYYY-MM-DD-digest.md` in the repo so there's
+     always an easy place to see what happened overnight.
+   - Every Cline run ends with a short summary (the extension appends the
+     request automatically), so the done files have what you need.
+
+If the user says "work on this overnight", confirm the plan, queue the batch,
+and tell them the digest will be waiting in the morning.
+
 ## Reporting back
 
 When a task lands in `tasks/done/`, read its `result` and the final
