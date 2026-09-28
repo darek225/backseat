@@ -40,6 +40,12 @@ import {
   tailLines,
   utcnow,
 } from './logic';
+import {
+  DashboardBackend,
+  DashboardState,
+  DashboardTask,
+  SidebarProvider,
+} from './sidebar';
 
 const execFile = promisify(cp.execFile);
 
@@ -185,6 +191,13 @@ class BridgeRunner {
   private lastPushAt = 0;
   /** Heartbeats push at most this often — a commit every 30s all night is noise. */
   private static readonly PUSH_THROTTLE_MS = 120_000;
+
+  // Dashboard state (mirrored from setStatus so the sidebar can render it).
+  private statusKind: 'idle' | 'stopped' | 'working' | 'error' = 'stopped';
+  private statusDetail = '';
+  private readonly stateChangeEmitter = new vscode.EventEmitter<void>();
+  /** Fires whenever polling state, status, or task state changes. */
+  readonly onDidChangeState = this.stateChangeEmitter.event;
 
   tree: TaskTreeProvider | undefined;
 
@@ -495,6 +508,9 @@ class BridgeRunner {
   }
 
   private setStatus(kind: 'idle' | 'stopped' | 'working' | 'error', detail = ''): void {
+    this.statusKind = kind;
+    this.statusDetail = detail;
+    this.stateChangeEmitter.fire();
     const icons: Record<string, string> = {
       idle: '$(check) Backseat: idle',
       stopped: '$(circle-slash) Backseat: off',
@@ -1239,11 +1255,83 @@ class BridgeRunner {
     vscode.window.showInformationMessage(lines.join('\n'));
   }
 
+  // ------------------------------------------------------------------
+  // Sidebar dashboard backend (see sidebar.ts)
+  // ------------------------------------------------------------------
+
+  /** Snapshot of everything the dashboard renders. */
+  getDashboardState(): DashboardState {
+    const cfg = this.config;
+    const c = vscode.workspace.getConfiguration('backseat');
+    return {
+      version: this.ctx.extension.packageJSON.version ?? '?',
+      running: this.isRunning,
+      status: this.statusKind,
+      statusDetail: this.statusDetail,
+      repoPath: cfg?.repoPath ?? '',
+      bridgeRepo: String(c.get('bridgeRepo') ?? ''),
+      notifyTopic: String(c.get('notifyTopic') ?? ''),
+      pollIntervalSec: cfg?.pollIntervalSec ?? 30,
+      currentTask: this.taskRunning ? this.currentTaskLabel || 'yes' : '',
+      tasks: this.getTasks(),
+    };
+  }
+
+  /** Task rows for the dashboard, newest-ish first per queue. */
+  getTasks(): DashboardTask[] {
+    const cfg = this.config;
+    if (!cfg?.repoPath) {
+      return [];
+    }
+    const out: DashboardTask[] = [];
+    for (const kind of ['pending', 'active', 'done'] as const) {
+      let files: string[] = [];
+      try {
+        files = fs
+          .readdirSync(path.join(cfg.repoPath, 'tasks', kind))
+          .filter((f) => f.endsWith('.json'))
+          .sort()
+          .reverse();
+      } catch {
+        continue;
+      }
+      for (const f of files.slice(0, 20)) {
+        let title = f.replace(/\.json$/, '');
+        let id = title;
+        try {
+          const t = readJson(path.join(cfg.repoPath, 'tasks', kind, f)) as BridgeTask;
+          id = t.id || id;
+          title = t.title || t.id || title;
+        } catch {
+          /* keep filename */
+        }
+        out.push({ kind, id, title });
+      }
+    }
+    return out;
+  }
+
+  /** Save setup from the dashboard and (re)connect. */
+  async saveSettings(bridgeRepo: string, notifyTopic: string): Promise<void> {
+    const c = vscode.workspace.getConfiguration('backseat');
+    await c.update('bridgeRepo', bridgeRepo.trim(), vscode.ConfigurationTarget.Global);
+    await c.update('notifyTopic', notifyTopic.trim(), vscode.ConfigurationTarget.Global);
+    await this.start();
+  }
+
+  async startPolling(): Promise<void> {
+    await this.start();
+  }
+
+  stopPolling(): void {
+    this.stop();
+  }
+
   /**
    * Setup self-check: verifies every link in the chain (repo, git auth,
    * cline CLI, Cline extension + API) and prints a pasteable report.
    */
-  async doctor(): Promise<void> {
+  async doctor(): Promise<string[]> {
     const ver = this.ctx.extension.packageJSON.version ?? '?';
     const lines: string[] = [`Backseat doctor v${ver}`];
     const mark = (good: boolean, label: string, detail = '') =>
@@ -1359,6 +1447,7 @@ class BridgeRunner {
         ? 'Backseat doctor: all checks passed.'
         : `Backseat doctor: ${fails} check(s) failed — details in Output > Backseat.`,
     );
+    return lines;
   }
 }
 
@@ -1448,6 +1537,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const tree = new TaskTreeProvider(runner);
   runner.tree = tree;
   context.subscriptions.push(vscode.window.registerTreeDataProvider('backseat.tasks', tree));
+
+  // Sidebar dashboard tab.
+  const sidebar = new SidebarProvider(context, runner);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+  );
+  runner.onDidChangeState(() => sidebar.refresh());
 
   context.subscriptions.push(
     vscode.commands.registerCommand('backseat.start', () => {

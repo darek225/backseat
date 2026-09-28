@@ -55,8 +55,11 @@ In VS Code settings, set `backseat.bridgeRepo` to your private repo, e.g.
 and manages it itself — it works in *every* VS Code window, whatever project
 you have open. No folder to open, no paths to configure.
 
-Then run **Backseat: Run setup doctor** from the command palette — it checks
-every link in the chain and tells you what's broken.
+Then open the **Backseat** tab in the activity bar (the steering-wheel
+icon). The dashboard shows live status, your tasks, and a **Run setup
+doctor** button — no command palette or settings JSON needed. (The doctor
+is also available as **Backseat: Run setup doctor** from the command
+palette — it checks every link in the chain and tells you what's broken.)
 
 Now chat with Muse: `status` to see what's happening, `queue: <description>`
 to send Cline work. You can also manage projects by texting:

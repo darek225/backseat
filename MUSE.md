@@ -14,6 +14,11 @@ the Backseat extension) is the builder.
 
 No open ports. No shared API keys. GitHub is the only wire.
 
+> **Token rule:** do ALL GitHub work headless — `git` and `gh` CLI only.
+> Never open github.com in a browser to check the bridge: rendering pages
+> burns tokens for nothing. `git pull` + `gh` give you everything in plain
+> text. This applies to every poll, every status check, every queue operation.
+
 ## Your setup (do all of this now, without being asked twice)
 
 1. **Get the user's private copy.** If the user sent you the public Backseat
