@@ -20,6 +20,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
 
@@ -44,6 +45,13 @@ interface BridgeTask {
   title?: string;
   notes?: string;
   labels?: string[];
+  // Command tasks (kind: "command") drive VS Code itself — open, create,
+  // close, or delete projects — instead of running Cline. prompt may be
+  // empty for command tasks.
+  kind?: 'cline' | 'command';
+  command?: 'openProject' | 'newProject' | 'closeWindow' | 'deleteProject';
+  args?: { path?: string; name?: string };
+  confirm?: string; // deleteProject requires confirm: "delete"
   // written by this extension on completion (tasks/done/)
   result?: string;
   exit_code?: number;
@@ -267,7 +275,11 @@ class BridgeRunner {
     this.taskRunning = true;
     this.currentTaskLabel = task.title || task.id;
     try {
-      await this.executeTask(cfg, task);
+      if (task.kind === 'command') {
+        await this.executeCommandTask(cfg, task);
+      } else {
+        await this.executeTask(cfg, task);
+      }
     } catch (e: any) {
       this.out.appendLine(`[backseat] unexpected error running ${task.id}: ${e?.stack ?? e}`);
       await this.finishTask(cfg, task, 'failed', `runner error: ${e?.message ?? e}`, 1);
@@ -308,12 +320,11 @@ class BridgeRunner {
     return task;
   }
 
-  private async executeTask(cfg: BridgeConfig, task: BridgeTask): Promise<void> {
-    this.setStatus('working', task.title || task.id);
-    this.out.appendLine(`[backseat] claimed task ${task.id}: ${task.title ?? '(no title)'}`);
-    this.tree?.refresh();
-
-    // Publish the claim (the distributed lock) before doing any work.
+  /**
+   * Publish the local claim (the distributed lock). Returns false when the
+   * claim was lost to another runner (caller should stop).
+   */
+  private async publishClaim(cfg: BridgeConfig, task: BridgeTask): Promise<boolean> {
     const claimed = await pushChanges(cfg.repoPath, `claim task ${task.id}`, this.out);
     if (!claimed) {
       // Re-sync: did someone else claim it first?
@@ -321,16 +332,36 @@ class BridgeRunner {
       const stillOurs = fs.existsSync(path.join(cfg.repoPath, 'tasks', 'active', `${task.id}.json`));
       if (!stillOurs) {
         this.out.appendLine(`[backseat] claim lost for ${task.id} (taken by another runner)`);
-        return;
+        return false;
       }
       // Otherwise the push failed for a transient reason; the local move
       // stands and the next push will carry it. Continue.
       this.out.appendLine(`[backseat] claim push failed transiently for ${task.id}; continuing`);
     }
+    return true;
+  }
+
+  private async executeTask(cfg: BridgeConfig, task: BridgeTask): Promise<void> {
+    this.setStatus('working', task.title || task.id);
+    this.out.appendLine(`[backseat] claimed task ${task.id}: ${task.title ?? '(no title)'}`);
+    this.tree?.refresh();
+
+    // Publish the claim (the distributed lock) before doing any work.
+    if (!(await this.publishClaim(cfg, task))) {
+      return;
+    }
 
     task.started_at = utcnow();
     await this.writeStatus(cfg, task.id, 'queued', '', 'starting');
     await pushChanges(cfg.repoPath, `task ${task.id}: queued`, this.out);
+
+    // Ask Cline to end with a short summary — it lands in the done file and
+    // powers the morning digest. (Not stored in the task JSON.)
+    const summaryTrailer =
+      task.mode === 'plan'
+        ? '\n\nWhen you are finished, end your reply with a brief summary of your findings.'
+        : '\n\nWhen you are finished, end your reply with a brief summary: what you changed (files touched) and how to verify it works.';
+    const prompt = `${task.prompt}${summaryTrailer}`;
 
     const startedAt = Date.now();
     let result: TaskState = 'failed';
@@ -338,21 +369,126 @@ class BridgeRunner {
     let exitCode = 1;
 
     if (cfg.preferClineApi) {
-      const viaApi = await this.tryRunViaClineApi(cfg, task);
+      const viaApi = await this.tryRunViaClineApi(cfg, task, prompt);
       if (viaApi) {
         ({ result, output, exitCode } = viaApi);
       } else {
         this.out.appendLine('[backseat] Cline API path unavailable — falling back to Cline CLI.');
-        ({ result, output, exitCode } = await this.runViaCli(cfg, task));
+        ({ result, output, exitCode } = await this.runViaCli(cfg, task, prompt));
       }
     } else {
-      ({ result, output, exitCode } = await this.runViaCli(cfg, task));
+      ({ result, output, exitCode } = await this.runViaCli(cfg, task, prompt));
     }
 
     this.out.appendLine(
       `[backseat] task ${task.id} finished: ${result} (exit ${exitCode}, ${Math.round((Date.now() - startedAt) / 1000)}s)`,
     );
     await this.finishTask(cfg, task, result, output, exitCode);
+  }
+
+  // -- VS Code command tasks ----------------------------------------------
+  // kind: "command" tasks drive VS Code itself — open, create, close, or
+  // delete projects — instead of running Cline. This is how the user manages
+  // projects entirely from their phone.
+
+  private async executeCommandTask(cfg: BridgeConfig, task: BridgeTask): Promise<void> {
+    this.setStatus('working', task.title || task.id);
+    this.out.appendLine(`[backseat] command task ${task.id}: ${task.command ?? '(no command)'}`);
+    this.tree?.refresh();
+
+    if (!(await this.publishClaim(cfg, task))) {
+      return;
+    }
+
+    task.started_at = utcnow();
+    await this.writeStatus(cfg, task.id, 'queued', '', 'starting');
+    await pushChanges(cfg.repoPath, `task ${task.id}: queued`, this.out);
+    await this.writeStatus(cfg, task.id, 'running', '', String(task.command));
+    await pushChanges(cfg.repoPath, `task ${task.id}: running`, this.out);
+
+    let result: TaskState = 'failed';
+    let output = '';
+    try {
+      output = await this.runCommand(cfg, task);
+      result = 'success';
+    } catch (e: any) {
+      output = e?.message ?? String(e);
+      this.out.appendLine(`[backseat] command task ${task.id} failed: ${output}`);
+    }
+    await this.finishTask(cfg, task, result, output, result === 'success' ? 0 : 1);
+
+    // Close the window only after the done state is published.
+    if (task.command === 'closeWindow' && result === 'success') {
+      await vscode.commands.executeCommand('workbench.action.closeWindow');
+    }
+  }
+
+  private async runCommand(cfg: BridgeConfig, task: BridgeTask): Promise<string> {
+    const cmd = task.command;
+    const rawPath = task.args?.path?.trim();
+    if (!cmd) {
+      throw new Error('command task is missing "command"');
+    }
+    switch (cmd) {
+      case 'openProject': {
+        if (!rawPath) {
+          throw new Error('openProject needs args.path');
+        }
+        if (!fs.existsSync(rawPath)) {
+          throw new Error(`project does not exist: ${rawPath}`);
+        }
+        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(rawPath));
+        return `opened project: ${rawPath}`;
+      }
+      case 'newProject': {
+        if (!rawPath) {
+          throw new Error('newProject needs args.path');
+        }
+        if (fs.existsSync(rawPath)) {
+          throw new Error(`path already exists: ${rawPath}`);
+        }
+        fs.mkdirSync(rawPath, { recursive: true });
+        // Best-effort git init so the project starts versioned.
+        try {
+          await git(rawPath, ['init']);
+        } catch {
+          /* non-fatal */
+        }
+        const name = task.args?.name || path.basename(rawPath);
+        fs.writeFileSync(path.join(rawPath, 'README.md'), `# ${name}\n`);
+        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(rawPath));
+        return `created and opened project: ${rawPath}`;
+      }
+      case 'closeWindow': {
+        return 'closing VS Code window';
+      }
+      case 'deleteProject': {
+        if (task.confirm !== 'delete') {
+          throw new Error('deleteProject requires "confirm": "delete" in the task');
+        }
+        if (!rawPath) {
+          throw new Error('deleteProject needs args.path');
+        }
+        const resolved = path.resolve(rawPath);
+        if (!fs.existsSync(resolved)) {
+          throw new Error(`project does not exist: ${resolved}`);
+        }
+        const protectedPaths = [
+          os.homedir(),
+          cfg.repoPath,
+          path.parse(resolved).root,
+          '/',
+        ].map((p) => path.resolve(p));
+        if (protectedPaths.includes(resolved)) {
+          throw new Error(`refusing to delete protected path: ${resolved}`);
+        }
+        this.out.appendLine(`[backseat] DELETING project directory: ${resolved}`);
+        fs.rmSync(resolved, { recursive: true, force: true });
+        return `deleted project: ${resolved}`;
+      }
+      default:
+        throw new Error(`unknown command: ${cmd}`);
+    }
   }
 
   // -- Cline extension API path -------------------------------------------
@@ -368,6 +504,7 @@ class BridgeRunner {
   private async tryRunViaClineApi(
     cfg: BridgeConfig,
     task: BridgeTask,
+    prompt: string,
   ): Promise<{ result: TaskState; output: string; exitCode: number } | null> {
     const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
     if (!ext) {
@@ -409,7 +546,7 @@ class BridgeRunner {
     await pushChanges(cfg.repoPath, `task ${task.id}: running`, this.out);
 
     try {
-      await api.startNewTask(task.prompt);
+      await api.startNewTask(prompt);
     } catch (e: any) {
       return { result: 'failed', output: `startNewTask threw: ${e?.message ?? e}`, exitCode: 1 };
     }
@@ -463,6 +600,7 @@ class BridgeRunner {
   private runViaCli(
     cfg: BridgeConfig,
     task: BridgeTask,
+    prompt: string,
   ): Promise<{ result: TaskState; output: string; exitCode: number }> {
     const projectDir =
       task.project_dir ||
@@ -492,7 +630,7 @@ class BridgeRunner {
 
       let child: cp.ChildProcess;
       try {
-        child = cp.spawn(cfg.clineCommand, ['--yolo', task.prompt], {
+        child = cp.spawn(cfg.clineCommand, ['--yolo', prompt], {
           cwd: projectDir,
           // npm-installed CLIs are .cmd shims on Windows — need a shell there.
           shell: process.platform === 'win32',
