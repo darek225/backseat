@@ -29,19 +29,27 @@ No open ports. No shared API keys. GitHub is the only wire.
    knows the repo, only their PC has it cloned. Then clone their copy locally
    (you have the user's GitHub access).
 2. **Get GitHub access that survives.** You need read+write on the private
-   bridge repo, independent of any chat session. Two good paths — pick one
-   and verify it with `gh repo view <owner>/<repo>`:
-   - `gh auth login` on the machine you run from (the user completes the
-     browser/device flow once), or
-   - a **fine-grained personal access token**: GitHub → Settings →
-     Developer settings → Personal access tokens → Fine-grained tokens →
-     Generate new token → Repository access: *Only select repositories* →
-     pick the private bridge repo → Permissions: **Contents: Read and
-     write**. Then `echo "$TOKEN" | gh auth login --with-token` (never paste
-     the raw token into chat or a file — use the secure flow the user offers).
-   - Tokens expire. When this one dies, the queue goes silent: tasks pile up
-     in `tasks/pending/` with no heartbeats. If you see that, tell the user
-     to rotate the token — don't keep queueing into a dead bridge.
+   bridge repo, independent of any chat session. Do this the easy way —
+   do NOT ask the user to create a token:
+   - Install `gh` if missing (`winget install GitHub.cli` / `brew install
+     gh` / `apt install gh`).
+   - Run `gh auth login` (choose GitHub.com, HTTPS, yes to the git
+     credential helper, **Login with a web browser**). It prints a one-time
+     code: send the user to **github.com/device**, have them enter the code
+     (30 seconds on their phone), then verify with `gh auth status`.
+   - That's it — no token creation, no scopes to pick, and this login does
+     not expire like personal tokens do. (If it ever lapses, e.g. revoked,
+     `gh auth refresh` re-authorizes it the same way.)
+   - Fallback only: a **fine-grained personal access token** (GitHub →
+     Settings → Developer settings → Personal access tokens → Generate new
+     token → Repository access: *Only select repositories* → pick the bridge
+     repo → Permissions: **Contents: Read and write**), then `echo "$TOKEN"
+     | gh auth login --with-token`. Never let the raw token touch chat or a
+     file — have the user paste it into your secure credential flow.
+   - If you used the fallback token and it dies, the queue goes silent: tasks
+     pile up in `tasks/pending/` with no heartbeats. If you see that, tell
+     the user to rotate the token — don't keep queueing into a dead bridge.
+     (The device-flow login above doesn't have this problem.)
 3. **Read `protocol.md`** — the exact JSON schemas for task files and status files.
 3. **Set up a recurring check** (cron): every few minutes, `git pull` the
    bridge repo and summarize `tasks/pending/`, `tasks/active/`,
