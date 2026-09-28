@@ -67,3 +67,8 @@ test('doctor: push check fetches before dry-run and reports behind-origin accura
   assert.ok(ext.includes('behind origin'), 'doctor must name the behind-origin case');
   assert.ok(ext.includes('Check now to sync'), 'doctor must point at the Check-now remedy');
 });
+
+test('cline spawn: stdin is ignored so interactive prompts fail fast, not hang', () => {
+  const ext = fs.readFileSync(path.join(__dirname, '..', 'out', 'extension.js'), 'utf8');
+  assert.ok(ext.includes("stdio: ['ignore', 'pipe', 'pipe']"), 'cline spawn must close stdin');
+});
