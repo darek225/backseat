@@ -122,6 +122,28 @@ don't queue one giant task:
 If the user says "work on this overnight", confirm the plan, queue the batch,
 and tell them the digest will be waiting in the morning.
 
+## When a task fails
+
+The extension already retries transient failures on its own (backoff: 2 min,
+10 min) and keeps the queue moving — a failed task never blocks the tasks
+behind it. When one lands in `tasks/done/` with `result: failed`, read
+`error_kind`, `attempts`, and `error`, then triage:
+
+- `no_credits` → tell the user to top up their Cline credits. Do NOT
+  re-queue — it will fail again, and so will everything behind it. Pause the
+  batch and say so.
+- `context_overflow` → the prompt was too big. Split it into smaller tasks
+  and queue the pieces. Never re-queue the same oversized prompt.
+- `transient` (retries exhausted) → re-queue the task once more. If it fails
+  again, stop and tell the user — don't loop forever.
+- `failed` / `timeout` → read `error`, fix the prompt or the project setup
+  (wrong path, missing dependency, ambiguous instruction), then re-queue.
+- Hard rule: never re-queue the same failing task more than 3 times total.
+  After that, stop and explain what's wrong in plain words.
+- Stall recovery: a task stuck in `tasks/active/` with `heartbeat_at` more
+  than ~15 minutes stale means the PC side died (VS Code closed, PC asleep).
+  Move it back to `tasks/pending/` for a fresh attempt.
+
 ## Reporting back
 
 When a task lands in `tasks/done/`, read its `result` and the final
