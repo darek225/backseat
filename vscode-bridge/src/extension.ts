@@ -52,6 +52,9 @@ interface BridgeTask {
   command?: 'openProject' | 'newProject' | 'closeWindow' | 'deleteProject';
   args?: { path?: string; name?: string };
   confirm?: string; // deleteProject requires confirm: "delete"
+  max_retries?: number; // retries for transient failures (default 2)
+  attempts?: number; // written by this extension: total Cline attempts
+  error_kind?: ErrorKind; // written by this extension on failure
   // written by this extension on completion (tasks/done/)
   result?: string;
   exit_code?: number;
@@ -61,6 +64,41 @@ interface BridgeTask {
 }
 
 type TaskState = 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'timeout';
+
+/** How a Cline run failed — drives retry policy. */
+type ErrorKind = 'transient' | 'no_credits' | 'context_overflow' | 'timeout' | 'failed';
+
+/**
+ * Classify Cline's failure output. Transient errors (rate limits, network
+ * blips) are worth retrying with backoff; out-of-credits and context
+ * overflow will fail identically on retry, so they fail fast for Muse to
+ * triage (top-up, or split the task).
+ */
+function classifyError(output: string): ErrorKind {
+  const t = output.toLowerCase();
+  if (
+    /insufficient.*credit|out of.*credit|credits?.*(exhausted|depleted)|exceeded.*quota|quota.*exceeded|\bbilling\b/.test(
+      t,
+    )
+  ) {
+    return 'no_credits';
+  }
+  if (
+    /context.*(too large|too long|exceed|length|limit)|maximum context|token.*limit|exceed.*token|input.*too long|prompt.*too long/.test(
+      t,
+    )
+  ) {
+    return 'context_overflow';
+  }
+  if (
+    /rate.?limit|429|too many requests|overloaded|server error|\b5\d\d\b|econnreset|econnrefused|enotfound|etimedout|network|fetch failed|socket hang up|try again|temporar|unavailable|gateway/.test(
+      t,
+    )
+  ) {
+    return 'transient';
+  }
+  return 'failed';
+}
 
 interface BridgeConfig {
   repoPath: string;
@@ -341,6 +379,29 @@ class BridgeRunner {
     return true;
   }
 
+  /** Map a CLI run's outcome to an ErrorKind for the retry policy. */
+  private classifyCliResult(result: TaskState, output: string): ErrorKind {
+    if (result === 'success') {
+      return 'failed'; // unused on success
+    }
+    if (result === 'timeout') {
+      return 'timeout'; // we killed the process, so retrying is safe
+    }
+    return classifyError(output);
+  }
+
+  /** Sleep that aborts early when the bridge is stopped. */
+  private async sleepInterruptible(ms: number): Promise<boolean> {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (!this.isRunning) {
+        return false;
+      }
+      await sleep(Math.min(5000, end - Date.now()));
+    }
+    return this.isRunning;
+  }
+
   private async executeTask(cfg: BridgeConfig, task: BridgeTask): Promise<void> {
     this.setStatus('working', task.title || task.id);
     this.out.appendLine(`[backseat] claimed task ${task.id}: ${task.title ?? '(no title)'}`);
@@ -367,18 +428,64 @@ class BridgeRunner {
     let result: TaskState = 'failed';
     let output = '';
     let exitCode = 1;
+    let errorKind: ErrorKind = 'failed';
 
-    if (cfg.preferClineApi) {
-      const viaApi = await this.tryRunViaClineApi(cfg, task, prompt);
-      if (viaApi) {
-        ({ result, output, exitCode } = viaApi);
+    // Retry loop: transient failures (rate limits, network blips) get
+    // retried with backoff so one flaky run doesn't stall the queue.
+    // no_credits and context_overflow fail fast — retrying identically
+    // would fail identically; Muse triages those instead.
+    const maxRetries = task.max_retries ?? 2;
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      task.attempts = attempt;
+      let via: 'api' | 'cli' = 'cli';
+      if (cfg.preferClineApi) {
+        const viaApi = await this.tryRunViaClineApi(cfg, task, prompt);
+        if (viaApi) {
+          via = 'api';
+          ({ result, output, exitCode } = viaApi);
+          errorKind = result === 'success' ? 'failed' : classifyError(output);
+          if (result === 'timeout') {
+            // The API task may still be working in the sidebar — never
+            // auto-retry those, or the prompt would run twice.
+            errorKind = 'timeout';
+          }
+        } else {
+          this.out.appendLine('[backseat] Cline API path unavailable — falling back to Cline CLI.');
+          ({ result, output, exitCode } = await this.runViaCli(cfg, task, prompt));
+          errorKind = this.classifyCliResult(result, output);
+        }
       } else {
-        this.out.appendLine('[backseat] Cline API path unavailable — falling back to Cline CLI.');
         ({ result, output, exitCode } = await this.runViaCli(cfg, task, prompt));
+        errorKind = this.classifyCliResult(result, output);
       }
-    } else {
-      ({ result, output, exitCode } = await this.runViaCli(cfg, task, prompt));
+
+      const retryable =
+        errorKind === 'transient' || (errorKind === 'timeout' && via === 'cli');
+      if (result === 'success' || !retryable || attempt > maxRetries) {
+        break;
+      }
+      const delayMin = attempt === 1 ? 2 : 10;
+      this.out.appendLine(
+        `[backseat] task ${task.id} hit ${errorKind}; retrying in ${delayMin}m (attempt ${attempt + 1}/${maxRetries + 1})`,
+      );
+      await this.writeStatus(
+        cfg,
+        task.id,
+        'running',
+        tailLines(output),
+        `retrying in ${delayMin}m (attempt ${attempt + 1})`,
+      );
+      await pushChanges(cfg.repoPath, `task ${task.id}: retrying`, this.out);
+      if (!(await this.sleepInterruptible(delayMin * 60_000))) {
+        output += '\n[stopped during retry backoff]';
+        result = 'failed';
+        errorKind = 'failed';
+        break;
+      }
     }
+    task.error_kind = result === 'success' ? undefined : errorKind;
 
     this.out.appendLine(
       `[backseat] task ${task.id} finished: ${result} (exit ${exitCode}, ${Math.round((Date.now() - startedAt) / 1000)}s)`,
