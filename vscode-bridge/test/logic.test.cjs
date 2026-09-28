@@ -150,3 +150,39 @@ test('clineSpawnTarget: posix spawns the CLI directly, no shell', () => {
     assert.equal(t.shell, false);
   }
 });
+
+test('transcriptText: reads ClineMessage-shaped error transcript', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  // Shape the Cline SDK actually persists (see message-translator.ts):
+  // ask:"api_req_failed" with the provider error as text.
+  const messages = [
+    { ts: 1, type: 'say', say: 'text', text: 'I will add the placement rules now.' },
+    { ts: 2, type: 'say', say: 'api_req_started', text: JSON.stringify({ streamingFailedMessage: 'provider rejected the request: invalid request' }) },
+    { ts: 3, type: 'ask', ask: 'api_req_failed', text: 'provider rejected the request: invalid request error trace_id: [redacted]' },
+  ];
+  fs.writeFileSync(p, JSON.stringify(messages));
+  const tail = logic.transcriptText(p, 4000);
+  assert.ok(tail.includes('api_req_failed'), 'error ask kind visible, got: ' + tail.slice(0, 200));
+  assert.ok(tail.includes('provider rejected the request'), 'error text visible');
+  assert.ok(logic.TRANSCRIPT_ERROR_RE.test(tail), 'error regex matches the tail');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptText: still reads Anthropic-style messages', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  const messages = [
+    { role: 'assistant', content: [{ type: 'text', text: 'Working on it' }, { type: 'tool_use', name: 'write_to_file' }] },
+  ];
+  fs.writeFileSync(p, JSON.stringify(messages));
+  const tail = logic.transcriptText(p, 4000);
+  assert.ok(tail.includes('Working on it'));
+  assert.ok(tail.includes('using tool: write_to_file'));
+  assert.ok(!logic.TRANSCRIPT_ERROR_RE.test(tail), 'no false positive on normal transcript');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptText: missing file returns empty string', () => {
+  assert.equal(logic.transcriptText('/nonexistent/messages.json', 1000), '');
+});

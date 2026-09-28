@@ -38,6 +38,8 @@ import {
   shouldRetryTask,
   tailLines,
   utcnow,
+  transcriptText,
+  TRANSCRIPT_ERROR_RE,
 } from './logic';
 import {
   DashboardBackend,
@@ -1151,30 +1153,12 @@ class BridgeRunner {
   }
 
 
-  /** Pull readable text out of Cline's persisted LLM messages (defensive). */
+  /**
+   * Pull readable text out of Cline's persisted session messages.
+   * Implemented in logic.ts (pure, unit-tested) — this is a thin wrapper.
+   */
   private transcriptText(messagesPath: string, maxChars: number): string {
-    try {
-      const raw = fs.readFileSync(messagesPath, 'utf8');
-      const parsed = JSON.parse(raw);
-      const messages = Array.isArray(parsed) ? parsed : parsed?.messages;
-      if (!Array.isArray(messages) || messages.length === 0) return '';
-      const chunks: string[] = [];
-      for (const m of messages.slice(-6)) {
-        const role = typeof m?.role === 'string' ? m.role : '';
-        const content = (m as any)?.content;
-        const blocks = Array.isArray(content) ? content : typeof content === 'string' ? [{ type: 'text', text: content }] : [];
-        for (const b of blocks) {
-          if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-            chunks.push(`${role}: ${b.text.trim()}`.slice(0, 1200));
-          } else if (b && b.type === 'tool_use' && typeof b.name === 'string') {
-            chunks.push(`${role} using tool: ${b.name}`);
-          }
-        }
-      }
-      return chunks.join('\n').slice(-maxChars);
-    } catch {
-      return '';
-    }
+    return transcriptText(messagesPath, maxChars);
   }
 
   private messagesMtimeMs(messagesPath: string | undefined): number {
@@ -1370,7 +1354,7 @@ class BridgeRunner {
     // retry/approve when one is showing and is a no-op otherwise.
     const STALL_MS = 3 * 60 * 1000;
     const ERROR_RETRY_MS = 60_000;
-    const ERROR_RE = /api[ _-]?req[ _-]?failed|rejected the request|request failed|rate.?limit|\b429\b|\b401\b|\b5\d\d\b|insufficient[ _-]?credits|quota/i;
+    const ERROR_RE = TRANSCRIPT_ERROR_RE;
     let lastMsgMtime = messagesPath ? this.messagesMtimeMs(messagesPath) : Date.now();
     let lastMsgCount = 0;
     let retryAttempted = false;
