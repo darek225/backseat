@@ -1043,41 +1043,89 @@ class BridgeRunner {
    * would run the prompt twice. From that point on we stay on the API path.
    */
   /**
-   * Latest file-modification time under a directory (ms since epoch), used
-   * as a liveness signal while a Cline sidebar task runs. Skips VCS and
-   * dependency dirs, Backseat's own done-files, and caps the walk so large
-   * workspaces stay cheap.
+   * Cline's shared session store (~/.cline/data/sessions/): a plain-JSON
+   * index plus per-session live transcripts, maintained by Cline itself and
+   * read by the extension, the CLI, and the hub. Backseat reads it to watch
+   * the sidebar task it started: status (running/completed/failed), live
+   * transcript, and liveness. This is Cline's designed persistence — not
+   * scraping — but it is best-effort: if the layout ever changes, the
+   * done-file handshake still completes tasks.
    */
-  private workspaceActivityMs(root: string): number {
-    let latest = 0;
-    let count = 0;
-    const skipDirs = new Set(['.git', 'node_modules', '.backseat', '.vscode']);
-    const stack: string[] = [root];
-    while (stack.length > 0 && count < 3000) {
-      const dir = stack.pop() as string;
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
-        continue;
+  private clineSessionsDir(): string {
+    const explicit =
+      process.env.CLINE_SESSION_DATA_DIR?.trim() ||
+      (process.env.CLINE_DATA_DIR?.trim()
+        ? path.join(process.env.CLINE_DATA_DIR.trim(), 'sessions')
+        : '');
+    if (explicit) return explicit;
+    const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+    return path.join(home, '.cline', 'data', 'sessions');
+  }
+
+  private readSessionsIndex(): Record<string, any> {
+    try {
+      const raw = fs.readFileSync(path.join(this.clineSessionsDir(), 'sessions.index.json'), 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.version === 1 && parsed.sessions && typeof parsed.sessions === 'object') {
+        return parsed.sessions as Record<string, any>;
       }
-      for (const e of entries) {
-        if (e.name.startsWith('.backseat-done-')) continue;
-        const full = path.join(dir, e.name);
-        if (e.isDirectory()) {
-          if (!skipDirs.has(e.name)) stack.push(full);
-        } else if (e.isFile()) {
-          count++;
-          try {
-            const m = fs.statSync(full).mtimeMs;
-            if (m > latest) latest = m;
-          } catch {
-            /* ignore */
+    } catch {
+      /* index missing or unreadable — session tracking unavailable */
+    }
+    return {};
+  }
+
+  /** Newest session whose prompt contains our task marker. */
+  private findBackseatSession(taskId: string): { sessionId: string; row: any } | null {
+    const marker = `[backseat:task:${taskId}]`;
+    const sessions = this.readSessionsIndex();
+    let best: { sessionId: string; row: any } | null = null;
+    let bestStart = '';
+    for (const [sessionId, row] of Object.entries(sessions)) {
+      const prompt = typeof row?.prompt === 'string' ? row.prompt : '';
+      if (!prompt.includes(marker)) continue;
+      const startedAt = typeof row?.startedAt === 'string' ? row.startedAt : '';
+      if (!best || startedAt >= bestStart) {
+        best = { sessionId, row };
+        bestStart = startedAt;
+      }
+    }
+    return best;
+  }
+
+  /** Pull readable text out of Cline's persisted LLM messages (defensive). */
+  private transcriptText(messagesPath: string, maxChars: number): string {
+    try {
+      const raw = fs.readFileSync(messagesPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      const messages = Array.isArray(parsed) ? parsed : parsed?.messages;
+      if (!Array.isArray(messages) || messages.length === 0) return '';
+      const chunks: string[] = [];
+      for (const m of messages.slice(-6)) {
+        const role = typeof m?.role === 'string' ? m.role : '';
+        const content = (m as any)?.content;
+        const blocks = Array.isArray(content) ? content : typeof content === 'string' ? [{ type: 'text', text: content }] : [];
+        for (const b of blocks) {
+          if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+            chunks.push(`${role}: ${b.text.trim()}`.slice(0, 1200));
+          } else if (b && b.type === 'tool_use' && typeof b.name === 'string') {
+            chunks.push(`${role} using tool: ${b.name}`);
           }
         }
       }
+      return chunks.join('\n').slice(-maxChars);
+    } catch {
+      return '';
     }
-    return latest;
+  }
+
+  private messagesMtimeMs(messagesPath: string | undefined): number {
+    if (!messagesPath) return 0;
+    try {
+      return fs.statSync(messagesPath).mtimeMs;
+    } catch {
+      return 0;
+    }
   }
 
   private async tryRunViaClineApi(
@@ -1124,8 +1172,9 @@ class BridgeRunner {
       /* no stale sentinel */
     }
 
+    const taskMarker = `[backseat:task:${task.id}]`;
     const fullPrompt =
-      `${prompt}\n\n---\n` +
+      `${taskMarker}\n${prompt}\n\n---\n` +
       `When you have FULLY completed everything above, write a file named ${sentinelName} ` +
       `in the current workspace root (${projectDir}). The first line of the file must be exactly ` +
       `DONE if you succeeded or FAILED if you could not complete the work. After that line, write a ` +
@@ -1142,17 +1191,51 @@ class BridgeRunner {
       return { result: 'failed', output: `startNewTask threw: ${e?.message ?? e}`, exitCode: 1 };
     }
 
+    // Find our session in Cline's session store (best-effort; the
+    // done-file handshake below works without it).
+    let sessionId: string | null = null;
+    let messagesPath: string | undefined;
+    {
+      const foundBy = Date.now() + 90_000;
+      while (!sessionId && Date.now() < foundBy) {
+        const found = this.findBackseatSession(task.id);
+        if (found) {
+          sessionId = found.sessionId;
+          messagesPath = typeof found.row?.messagesPath === 'string' ? found.row.messagesPath : undefined;
+          this.out.appendLine(`[backseat] tracking Cline session ${sessionId} for ${task.id}`);
+        } else {
+          await sleep(5_000);
+        }
+      }
+      if (!sessionId) {
+        this.out.appendLine('[backseat] Cline session not found in session store — done-file only.');
+      }
+    }
+
+    const readDoneFile = (): string | null => {
+      try {
+        if (fs.existsSync(sentinelPath)) return fs.readFileSync(sentinelPath, 'utf8');
+      } catch {
+        /* ignore */
+      }
+      return null;
+    };
+
     const timeoutMs = (task.timeout_sec ?? cfg.defaultTimeoutSec) * 1000;
     const started = Date.now();
     let lastHeartbeat = 0;
-    // Liveness: file edits in the workspace mean Cline is progressing. If
-    // the workspace goes quiet (e.g. a provider error is sitting in the
-    // chat waiting on the retry button), press Cline's primary button once
-    // per quiet spell — that clicks retry/approve when one is showing and
-    // is a no-op otherwise.
+    // Liveness comes from the live transcript: new messages mean Cline is
+    // progressing. If the transcript goes quiet while the session is still
+    // running (e.g. a provider error waiting on the retry button), press
+    // Cline's primary button once per quiet spell — that clicks
+    // retry/approve when one is showing and is a no-op otherwise.
     const STALL_MS = 3 * 60 * 1000;
-    let lastActivity = Date.now();
+    const ERROR_RETRY_MS = 60_000;
+    const ERROR_RE = /api[ _-]?req[ _-]?failed|rejected the request|request failed|rate.?limit|\b429\b|\b401\b|\b5\d\d\b|insufficient[ _-]?credits|quota/i;
+    let lastMsgMtime = messagesPath ? this.messagesMtimeMs(messagesPath) : Date.now();
+    let lastMsgCount = 0;
     let retryAttempted = false;
+    let errorRetryAttempted = false;
     for (;;) {
       await sleep(10_000);
       if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
@@ -1160,13 +1243,78 @@ class BridgeRunner {
         await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) working');
         await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
       }
-      if (this.workspaceActivityMs(projectDir) > lastActivity) {
-        lastActivity = Date.now();
-        retryAttempted = false;
-      } else if (!retryAttempted && Date.now() - lastActivity > STALL_MS) {
+
+      // 1. Done-file handshake (primary result carrier: Cline's summary).
+      const doneContent = readDoneFile();
+      if (doneContent !== null) {
+        try {
+          fs.unlinkSync(sentinelPath);
+        } catch {
+          /* already gone */
+        }
+        const firstLine = doneContent.split('\n')[0].trim().toUpperCase();
+        const ok = firstLine === 'DONE';
+        this.out.appendLine(`[backseat] Cline sidebar task ${task.id} finished via done-file: ${firstLine || '(empty)'}`);
+        return { result: ok ? 'success' : 'failed', output: doneContent.slice(0, 8000), exitCode: ok ? 0 : 1 };
+      }
+
+      // 2. Session-store signals.
+      let status: string | undefined;
+      let transcriptTail = '';
+      if (sessionId) {
+        const found = this.findBackseatSession(task.id);
+        if (found && found.sessionId === sessionId) {
+          status = typeof found.row?.status === 'string' ? found.row.status : undefined;
+          if (!messagesPath && typeof found.row?.messagesPath === 'string') {
+            messagesPath = found.row.messagesPath;
+          }
+        }
+        if (messagesPath) {
+          const mtime = this.messagesMtimeMs(messagesPath);
+          if (mtime > lastMsgMtime) {
+            lastMsgMtime = mtime;
+            lastMsgCount++;
+            retryAttempted = false;
+            errorRetryAttempted = false;
+          }
+          transcriptTail = this.transcriptText(messagesPath, 1500);
+        }
+      }
+
+      // 2a. Terminal session status completes the task even without a done-file.
+      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        const ok = status === 'completed';
+        this.out.appendLine(`[backseat] Cline session ${sessionId} reached status '${status}'.`);
+        const output = transcriptTail
+          ? `Cline session ${status}. Last transcript:\n${transcriptTail}`
+          : `Cline session ${status} (no transcript available).`;
+        return { result: ok ? 'success' : 'failed', output: output.slice(0, 8000), exitCode: ok ? 0 : 1 };
+      }
+
+      // 2b. Error visible in the transcript + quiet spell -> retry fast.
+      const quietMs = Date.now() - lastMsgMtime;
+      if (
+        sessionId &&
+        !errorRetryAttempted &&
+        quietMs > ERROR_RETRY_MS &&
+        transcriptTail &&
+        ERROR_RE.test(transcriptTail)
+      ) {
+        errorRetryAttempted = true;
+        this.out.appendLine(
+          `[backseat] transcript shows an error and Cline is quiet — pressing primary button (retry).`,
+        );
+        await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) error seen — retried');
+        try {
+          await api.pressPrimaryButton?.();
+        } catch (e: any) {
+          this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
+        }
+      } else if (sessionId && !retryAttempted && quietMs > STALL_MS) {
+        // 2c. Generic stall (no transcript movement at all) -> retry once.
         retryAttempted = true;
         this.out.appendLine(
-          `[backseat] no workspace activity for 3m on ${task.id} — pressing Cline's primary button (retry/approve).`,
+          `[backseat] no transcript activity for 3m on ${task.id} — pressing Cline's primary button (retry/approve).`,
         );
         await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) quiet — tried retry');
         try {
@@ -1175,36 +1323,11 @@ class BridgeRunner {
           this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
         }
       }
-      let content: string | null = null;
-      try {
-        if (fs.existsSync(sentinelPath)) {
-          content = fs.readFileSync(sentinelPath, 'utf8');
-        }
-      } catch {
-        content = null;
-      }
-      if (content !== null) {
-        // Remove the sentinel immediately so a heartbeat push can never
-        // sweep it into the bridge repo, and a retry starts clean.
-        try {
-          fs.unlinkSync(sentinelPath);
-        } catch {
-          /* already gone */
-        }
-        const firstLine = content.split('\n')[0].trim().toUpperCase();
-        const ok = firstLine === 'DONE';
-        this.out.appendLine(`[backseat] Cline sidebar task ${task.id} finished: ${firstLine || '(empty)'}`);
-        return {
-          result: ok ? 'success' : 'failed',
-          output: content.slice(0, 8000),
-          exitCode: ok ? 0 : 1,
-        };
-      }
       if (Date.now() - started >= timeoutMs) {
         return {
           result: 'timeout',
           output:
-            'Timed out waiting for the Cline sidebar task to write its done-file. ' +
+            'Timed out waiting for the Cline sidebar task (no done-file, no terminal session status). ' +
             'Cline may still be working — check the sidebar.',
           exitCode: 124,
         };
@@ -1675,9 +1798,11 @@ class BridgeRunner {
         const api = (await ext.activate()) as ClineApi;
         mark(typeof api?.startNewTask === 'function', 'Cline API: startNewTask');
         // The sidebar path is primary: tasks run visibly in the Cline chat
-        // and completion is a done-file handshake (no completion signal in
-        // the API itself). CLI remains as fallback.
-        mark(true, 'Cline API: task path', 'sidebar chat via startNewTask + done-file handshake');
+        // and Backseat tracks the session through Cline's shared session
+        // store (~/.cline/data/sessions): live status, transcript, and
+        // liveness, plus the done-file handshake for Cline's summary.
+        // CLI remains as fallback.
+        mark(true, 'Cline API: task path', 'sidebar chat via startNewTask + session-store tracking');
       } catch (e: any) {
         mark(false, 'Cline extension activates', e?.message ?? String(e));
       }
