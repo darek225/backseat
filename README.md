@@ -21,17 +21,12 @@ repository. That's your personal bridge — your tasks and project paths stay
 visible only to you.
 
 **2. Give your Muse access to the repo.**
-Your Muse needs to read and write that private repo. Create a **fine-grained
-personal access token** in GitHub: Settings → Developer settings →
-Personal access tokens → Fine-grained tokens → Generate new token.
-Set Repository access to *Only select repositories*, pick your private bridge
-repo, and grant **Contents: Read and write**. Then paste the repo link into
-Muse and say *"set up Backseat with this repo"* — share the token through
-Muse's secure flow (never in plain chat). It reads `MUSE.md`, clones your
-copy, and starts watching for work. Its side is fully automatic from there.
-
-Heads-up: tokens expire. If tasks ever pile up with no progress, the token
-probably died — generate a fresh one and hand it over again.
+Your Muse needs to read and write that private repo. Paste the repo link
+into Muse and say *"set up Backseat with this repo"* — it reads `MUSE.md`,
+installs the GitHub CLI if needed, and walks you through a 30-second
+sign-in: it shows you a short code, you type it into **github.com/device**
+on your phone, done. No tokens to create, no permissions to pick.
+Its side is fully automatic from there.
 
 Then tell your Muse two things:
 - *"Check the bridge repo every 10 minutes and tell me when tasks finish."*
