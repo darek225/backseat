@@ -226,6 +226,14 @@ When it's gone, the loop stops within ~30s as `cancelled` — without
 overwriting the done record you wrote — and the next pending task is
 picked up on the following poll. A failed fetch is fail-open: the task
 keeps running, so a network blip never cancels work.
+On cancellation the runner also resets its working tree to the upstream
+ref (`rebase --abort`, then `reset --hard`), because its own superseded
+heartbeat/finish commits would otherwise collide with the canceller's
+record on the next `pull --rebase` and wedge the bridge with "pull
+failed". If you ever see a stuck "pull failed" on an older version,
+recover manually in the bridge clone: `git rebase --abort`, then
+`git reset --hard origin/main` (the abort must come first — a conflicted
+rebase leaves HEAD detached).
 
 ## Concurrency
 

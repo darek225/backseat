@@ -1363,6 +1363,48 @@ class BridgeRunner {
   }
 
   /**
+   * After a remote cancel, the canceller's state on origin is authoritative:
+   * our local heartbeat commits and our own version of the done record are
+   * superseded. Reset the working tree to the upstream ref so the next
+   * pull/push is clean. Without this, our local done-file commit would
+   * conflict with the canceller's on the next pull --rebase and wedge the
+   * bridge with a permanent "pull failed". Best-effort: if the reset
+   * fails, the normal finish path still runs (and may wedge, as before).
+   * After the reset, finishTask's no-clobber guard keeps the canceller's
+   * done record; if the canceller hasn't written one yet, finishTask
+   * writes the runner's own backstop version.
+   */
+  private async alignWithOriginAfterCancel(repoPath: string): Promise<void> {
+    try {
+      await git(repoPath, ['fetch', '--quiet', 'origin']);
+      // Abort FIRST: a conflicted pull --rebase leaves HEAD detached, and
+      // @{u} does not resolve until we're back on the branch.
+      await git(repoPath, ['rebase', '--abort']); // best-effort: may not be rebasing
+      const up = await git(repoPath, [
+        'rev-parse',
+        '--abbrev-ref',
+        '--symbolic-full-name',
+        '@{u}',
+      ]);
+      if (up.code !== 0) {
+        this.out.appendLine('[backseat] cancel: no upstream ref, skipping origin alignment');
+        return;
+      }
+      const ref = up.out.trim();
+      const reset = await git(repoPath, ['reset', '--hard', ref]);
+      if (reset.code !== 0) {
+        this.out.appendLine(`[backseat] cancel: reset --hard failed: ${reset.out.slice(-200)}`);
+        return;
+      }
+      this.out.appendLine(`[backseat] cancel: working tree reset to ${ref}`);
+    } catch (e: any) {
+      this.out.appendLine(
+        `[backseat] cancel: origin alignment failed (non-fatal): ${e?.message ?? e}`,
+      );
+    }
+  }
+
+  /**
    * Watch a Cline sidebar session until it finishes: done-file handshake
    * first, then terminal session status, then transcript-error retry
    * (presses Cline's primary button = Resume/Retry), then stall retry.
@@ -1447,8 +1489,9 @@ class BridgeRunner {
         const stillActive = await this.remoteActiveTaskExists(cfg.repoPath, task.id);
         if (isRemoteCancelled(stillActive)) {
           this.out.appendLine(
-            `[backseat] ${task.id} was cancelled remotely (active file gone from origin) — stopping.`,
+            `[backseat] ${task.id} was cancelled remotely (active file gone from origin) — aligning with origin and stopping.`,
           );
+          await this.alignWithOriginAfterCancel(cfg.repoPath);
           return {
             result: 'cancelled',
             output: 'cancelled remotely via the bridge repo; the done record was written by the cancelling side',

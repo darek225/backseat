@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.8] - 2026-09-28
+### Fixed
+- Remote cancel no longer wedges the bridge. In 0.9.7 the cancelled
+  runner's own superseded done-file/heartbeat commits collided with the
+  canceller's record on the next `pull --rebase` ("pull failed" forever).
+  The cancel path now resets the working tree to the upstream ref
+  (`rebase --abort`, then `reset --hard`) before finishing, so the
+  canceller's done record stands and the next poll/push is clean. The
+  abort must come first: a conflicted rebase leaves HEAD detached and
+  `@{u}` unresolvable. Recovery sequence verified with a live git
+  simulation of the exact wedge. Manual recovery for older versions also
+  documented in protocol.md.
+
 ## [0.9.7] - 2026-09-28
 ### Added
 - Remote cancel for running tasks (pure git, no new setup): the Muse side
