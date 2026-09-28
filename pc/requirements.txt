@@ -1,0 +1,2 @@
+# The PC watcher uses Python's standard library only, plus the `git` CLI.
+# No pip packages required. Python 3.10+ recommended.

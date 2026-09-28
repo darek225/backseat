@@ -1,0 +1,1 @@
+{"_comment":"Copy this file to config.json and edit the values. NEVER put API keys or secrets in this file.","cline_cmd":"cline","default_project_dir":"C:\\Users\\YOURNAME\\code\\myapp","default_timeout_sec":1800,"heartbeat_sec":30,"poll_interval_sec":20,"repo_dir":"C:\\Users\\YOURNAME\\muse-cline-bridge"}
