@@ -4,3 +4,4 @@ src/**
 **/*.map
 **/*.ts
 node_modules/**
+images/logo.png
