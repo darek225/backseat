@@ -21,20 +21,33 @@ export type TaskState = 'queued' | 'running' | 'success' | 'failed' | 'cancelled
  * it ("Unknown command or unquoted prompt"). Routing through
  * `cmd.exe /d /s /c` with `shell: false` lets libuv quote each argv
  * element correctly instead.
+ *
+ * The CLI defaults to its own provider/model (currently provider `cline`,
+ * model `anthropic/claude-sonnet-4.6`) — NOT the VS Code extension's.
+ * Pass opts.provider/opts.model to run the user's actual setup instead.
  */
 export function clineSpawnTarget(
   clineCommand: string,
   prompt: string,
   platform: string = process.platform,
+  opts: { provider?: string; model?: string } = {},
 ): { file: string; args: string[]; shell: boolean } {
+  const cliArgs = ['--yolo'];
+  if (opts.provider) {
+    cliArgs.push('-P', opts.provider);
+  }
+  if (opts.model) {
+    cliArgs.push('-m', opts.model);
+  }
+  cliArgs.push(prompt);
   if (platform === 'win32') {
     return {
       file: 'cmd.exe',
-      args: ['/d', '/s', '/c', clineCommand, '--yolo', prompt],
+      args: ['/d', '/s', '/c', clineCommand, ...cliArgs],
       shell: false,
     };
   }
-  return { file: clineCommand, args: ['--yolo', prompt], shell: false };
+  return { file: clineCommand, args: cliArgs, shell: false };
 }
 
 /** How a Cline run failed — drives retry policy. */

@@ -24,6 +24,8 @@ export interface DashboardState {
   repoPath: string;
   bridgeRepo: string;
   notifyTopic: string;
+  clineProvider: string;
+  clineModel: string;
   pollIntervalSec: number;
   currentTask: string;
   tasks: DashboardTask[];
@@ -33,7 +35,7 @@ export interface DashboardState {
 export interface DashboardBackend {
   getDashboardState(): DashboardState;
   onDidChangeState: vscode.Event<void>;
-  saveSettings(bridgeRepo: string, notifyTopic: string): Promise<void>;
+  saveSettings(bridgeRepo: string, notifyTopic: string, clineProvider: string, clineModel: string): Promise<void>;
   collectDoctorReport(): Promise<string[]>;
   checkNow(): Promise<void>;
   startPolling(): Promise<void>;
@@ -64,7 +66,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           this.pushState();
           break;
         case 'saveSettings':
-          await this.backend.saveSettings(String(msg.bridgeRepo ?? ''), String(msg.notifyTopic ?? ''));
+          await this.backend.saveSettings(
+            String(msg.bridgeRepo ?? ''),
+            String(msg.notifyTopic ?? ''),
+            String(msg.clineProvider ?? ''),
+            String(msg.clineModel ?? ''),
+          );
           this.pushState();
           break;
         case 'runDoctor': {
@@ -196,7 +203,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       <label for="in-topic">Instant-ping topic (optional)</label>
       <input type="text" id="in-topic" placeholder="backseat-9f3k7q2x" />
     </div></div>
+    <div class="row"><div style="flex:1">
+      <label for="in-provider">Cline provider (optional — match your VS Code setup)</label>
+      <input type="text" id="in-provider" placeholder="e.g. deepseek, openrouter" />
+    </div></div>
+    <div class="row"><div style="flex:1">
+      <label for="in-model">Cline model (optional)</label>
+      <input type="text" id="in-model" placeholder="e.g. deepseek-chat" />
+    </div></div>
     <div class="btnrow"><button id="btn-save">Save &amp; connect</button></div>
+    <div class="hint">The CLI does not inherit your VS Code Cline provider — without these it uses its own (slow) defaults.</div>
     <div class="hint">The extension clones the repo into ~/.backseat/bridge itself. No folder to open.</div>
   </div>
 
@@ -242,6 +258,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     $('st-poll').textContent = S.pollIntervalSec;
     if (document.activeElement !== $('in-repo')) $('in-repo').value = S.bridgeRepo || '';
     if (document.activeElement !== $('in-topic')) $('in-topic').value = S.notifyTopic || '';
+    if (document.activeElement !== $('in-provider')) $('in-provider').value = S.clineProvider || '';
+    if (document.activeElement !== $('in-model')) $('in-model').value = S.clineModel || '';
     $('btn-toggle').textContent = S.running ? 'Stop' : 'Start';
     const box = $('tasks');
     if (!S.tasks.length) {
@@ -271,7 +289,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 
   $('btn-save').addEventListener('click', () => {
-    vscode.postMessage({ type: 'saveSettings', bridgeRepo: $('in-repo').value, notifyTopic: $('in-topic').value });
+    vscode.postMessage({ type: 'saveSettings', bridgeRepo: $('in-repo').value, notifyTopic: $('in-topic').value, clineProvider: $('in-provider').value, clineModel: $('in-model').value });
   });
   $('btn-toggle').addEventListener('click', () => vscode.postMessage({ type: 'toggle' }));
   $('btn-poll').addEventListener('click', () => vscode.postMessage({ type: 'pollNow' }));

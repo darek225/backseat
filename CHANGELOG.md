@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.5
+
+- **Cline CLI provider/model settings**: the CLI does NOT inherit the VS Code
+  extension's provider/model — it was silently using its own defaults
+  (provider `cline`, model `anthropic/claude-sonnet-4.6`), which ran much
+  slower than the user's VS Code setup. New `backseat.clineProvider` and
+  `backseat.clineModel` settings (also in the dashboard setup card) are
+  passed as `-P`/`-m` flags; the doctor reports which provider/model task
+  runs will use.
+
 ## 0.7.4
 
 - **CLI stdin closed**: the spawned Cline process now gets `stdio: ['ignore',

@@ -94,6 +94,10 @@ interface BridgeConfig {
   pollIntervalSec: number;
   autoStart: boolean;
   clineCommand: string;
+  /** CLI provider id (e.g. "deepseek", "openrouter"). "" = CLI default. */
+  clineProvider: string;
+  /** CLI model id. "" = CLI default. */
+  clineModel: string;
   preferClineApi: boolean;
   defaultTimeoutSec: number;
   heartbeatSec: number;
@@ -227,6 +231,8 @@ class BridgeRunner {
       pollIntervalSec: Number(c.get('pollIntervalSec') ?? 30),
       autoStart: Boolean(c.get('autoStart') ?? true),
       clineCommand: String(c.get('clineCommand') ?? 'cline'),
+      clineProvider: String(c.get('clineProvider') ?? '').trim(),
+      clineModel: String(c.get('clineModel') ?? '').trim(),
       preferClineApi: Boolean(c.get('preferClineApi') ?? true),
       defaultTimeoutSec: Number(c.get('defaultTimeoutSec') ?? 1800),
       heartbeatSec: Number(c.get('heartbeatSec') ?? 30),
@@ -1151,7 +1157,12 @@ class BridgeRunner {
       });
     }
 
-    this.out.appendLine(`[backseat] launching: ${cfg.clineCommand} --yolo (cwd=${projectDir})`);
+    const pm = [cfg.clineProvider ? `-P ${cfg.clineProvider}` : '', cfg.clineModel ? `-m ${cfg.clineModel}` : '']
+      .filter(Boolean)
+      .join(' ');
+    this.out.appendLine(
+      `[backseat] launching: ${cfg.clineCommand} --yolo${pm ? ' ' + pm : ''} (cwd=${projectDir})`,
+    );
 
     return new Promise((resolve) => {
       let output = '';
@@ -1167,7 +1178,10 @@ class BridgeRunner {
       try {
         // Spawn target is a pure function (logic.ts) so the Windows
         // cmd.exe/argv quoting is unit-testable — see clineSpawnTarget.
-        const target = clineSpawnTarget(cfg.clineCommand, prompt);
+        const target = clineSpawnTarget(cfg.clineCommand, prompt, process.platform, {
+          provider: cfg.clineProvider || undefined,
+          model: cfg.clineModel || undefined,
+        });
         child = cp.spawn(target.file, target.args, {
           cwd: projectDir,
           shell: target.shell,
@@ -1372,6 +1386,8 @@ class BridgeRunner {
       repoPath: cfg?.repoPath ?? '',
       bridgeRepo: String(c.get('bridgeRepo') ?? ''),
       notifyTopic: String(c.get('notifyTopic') ?? ''),
+      clineProvider: String(c.get('clineProvider') ?? ''),
+      clineModel: String(c.get('clineModel') ?? ''),
       pollIntervalSec: cfg?.pollIntervalSec ?? 30,
       currentTask: this.taskRunning ? this.currentTaskLabel || 'yes' : '',
       tasks: this.getTasks(),
@@ -1413,10 +1429,17 @@ class BridgeRunner {
   }
 
   /** Save setup from the dashboard and (re)connect. */
-  async saveSettings(bridgeRepo: string, notifyTopic: string): Promise<void> {
+  async saveSettings(
+    bridgeRepo: string,
+    notifyTopic: string,
+    clineProvider: string,
+    clineModel: string,
+  ): Promise<void> {
     const c = vscode.workspace.getConfiguration('backseat');
     await c.update('bridgeRepo', bridgeRepo.trim(), vscode.ConfigurationTarget.Global);
     await c.update('notifyTopic', notifyTopic.trim(), vscode.ConfigurationTarget.Global);
+    await c.update('clineProvider', clineProvider.trim(), vscode.ConfigurationTarget.Global);
+    await c.update('clineModel', clineModel.trim(), vscode.ConfigurationTarget.Global);
     await this.start();
   }
 
@@ -1551,6 +1574,15 @@ class BridgeRunner {
         );
       });
       mark(clinev.code === 0, `cline CLI ("${clineCmd}") found`, clinev.out || `not on PATH — set backseat.clineCommand`);
+      // The CLI does NOT inherit the VS Code extension's provider/model —
+      // without explicit settings it uses its own defaults, which may be
+      // slower (or bill a different account) than the user's setup.
+      const pm = [cfg.clineProvider, cfg.clineModel].filter(Boolean).join(' / ');
+      mark(
+        true,
+        'cline CLI provider/model for tasks',
+        pm || 'CLI defaults (provider "cline", model "anthropic/claude-sonnet-4.6") — set backseat.clineProvider/clineModel to match your VS Code setup',
+      );
     }
 
     const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
