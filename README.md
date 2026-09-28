@@ -21,17 +21,29 @@ repository. That's your personal bridge — your tasks and project paths stay
 visible only to you.
 
 **2. Give your Muse access to the repo.**
-Your Muse needs to read and write that private repo. The simplest path: in
-your GitHub settings, create a **fine-grained personal access token** scoped
-to just that repo (contents: read + write), then paste the repo link into
-Muse and say *"set up Backseat with this repo — here's a token with access."*
-and share the token through Muse's secure flow. It reads `MUSE.md`, clones
-your copy, and starts watching for work. Its side is fully automatic from
-there.
+Your Muse needs to read and write that private repo. Create a **fine-grained
+personal access token** in GitHub: Settings → Developer settings →
+Personal access tokens → Fine-grained tokens → Generate new token.
+Set Repository access to *Only select repositories*, pick your private bridge
+repo, and grant **Contents: Read and write**. Then paste the repo link into
+Muse and say *"set up Backseat with this repo"* — share the token through
+Muse's secure flow (never in plain chat). It reads `MUSE.md`, clones your
+copy, and starts watching for work. Its side is fully automatic from there.
+
+Heads-up: tokens expire. If tasks ever pile up with no progress, the token
+probably died — generate a fresh one and hand it over again.
 
 Then tell your Muse two things:
 - *"Check the bridge repo every 10 minutes and tell me when tasks finish."*
 - *"Every morning at 7, summarize last night's work into a digest."*
+
+**Instant pings (optional, recommended).** In VS Code settings, set
+`backseat.notifyTopic` to any unguessable string (e.g. `backseat-9f3k7q2x`).
+Two things get faster: your Muse's ping wakes the PC in ~1 second when you
+queue a task (instead of waiting for the next 30-second poll), and the PC
+pings back the moment a task finishes. Install the free **ntfy** app on your
+phone, subscribe to that topic, and completions buzz your pocket — no account
+needed.
 
 **3. Install the VS Code plugin.**
 Download [`dist/backseat-latest.vsix`](dist/backseat-latest.vsix), then in
@@ -73,8 +85,11 @@ PC. One private copy per person keeps every bridge separate by construction.
 - **Finished tasks** move to `tasks/done/` with the result; Muse reports
   back in chat like a human would.
 
-One task at a time. Heartbeats every ~30s while running. Muse's checks are
-polling (every few minutes), so asking `status` in chat is the fast path.
+One task at a time. Heartbeats every ~30s while running. With
+`backseat.notifyTopic` set, task pickup is ~instant (ntfy wake-up ping) and
+completions ping back immediately; without it, the extension polls every
+`pollIntervalSec` (default 30s). Muse's checks are polling (every few
+minutes), so asking `status` in chat is the fast path.
 
 ## Security
 
