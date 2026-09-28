@@ -45,6 +45,22 @@ Check for tasks now / Show status**. A status-bar item and an Explorer view
 ("Backseat Tasks") show pending/active/done tasks; output goes to the
 "Backseat" channel.
 
+## Remote project control
+
+Tasks with `"kind": "command"` drive VS Code itself instead of Cline, so the
+user can manage projects entirely from their phone (see `protocol.md`):
+
+| Command | What it does |
+|---|---|
+| `openProject` | Opens `args.path` in VS Code |
+| `newProject` | Creates `args.path` (`git init` + stub README) and opens it |
+| `closeWindow` | Publishes the done state, then closes VS Code |
+| `deleteProject` | Permanently deletes `args.path` — requires `"confirm": "delete"`, and refuses home dir / repo / filesystem roots |
+
+Every Cline run gets a summary trailer appended to its prompt ("end your
+reply with a brief summary: what you changed and how to verify it"), so done
+files carry what the morning digest needs.
+
 ## How it drives Cline
 
 1. **Extension API (preferred):** activates `saoudrizwan.claude-dev` and
