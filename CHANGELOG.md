@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.2] - 2026-09-28
+### Fixed
+- Orphan recovery now RESUMES the stranded Cline session instead of
+  restarting from scratch: the session is matched by the
+  `[backseat:task:<id>]` marker (or, for older tasks, by prompt-head +
+  workspace match — never a manual chat), re-adopted with its full
+  context, and watched with the same done-file / terminal-status /
+  error-retry loop. The done-file is checked first in case Cline finished
+  while the runner was dead. Only when no session can be matched does the
+  task restart fresh.
 ## [0.9.1] - 2026-09-28
 ### Fixed
 - Orphan recovery: tasks left in `tasks/active/` by a dead runner (extension

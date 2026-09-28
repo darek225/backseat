@@ -75,6 +75,7 @@ interface BridgeTask {
   confirm?: string; // deleteProject requires confirm: "delete"
   max_retries?: number; // retries for transient failures (default 2)
   claimed_by?: string; // written by this extension on claim: unique runner id
+  resume_session?: string; // written by orphan recovery: adopt this Cline session instead of starting fresh
   attempts?: number; // written by this extension: total Cline attempts
   error_kind?: ErrorKind; // written by this extension on failure
   // written by this extension on completion (tasks/done/)
@@ -794,7 +795,12 @@ class BridgeRunner {
       task.attempts = attempt;
       let via: 'api' | 'cli' = 'cli';
       if (cfg.preferClineApi) {
-        const viaApi = await this.tryRunViaClineApi(cfg, task, prompt);
+        const resumeSessionId =
+          typeof task.resume_session === 'string' ? task.resume_session : undefined;
+        delete task.resume_session; // resume once — retries start fresh
+        const viaApi = resumeSessionId
+          ? await this.tryResumeViaClineApi(cfg, task, resumeSessionId)
+          : await this.tryRunViaClineApi(cfg, task, prompt);
         if (viaApi) {
           via = 'api';
           ({ result, output, exitCode } = viaApi);
@@ -1095,6 +1101,56 @@ class BridgeRunner {
     return best;
   }
 
+  /** Read one session row straight from the index (works for any session). */
+  private readSessionRow(sessionId: string): any | null {
+    const sessions = this.readSessionsIndex();
+    const row = (sessions as Record<string, any>)[sessionId];
+    return row && typeof row === 'object' ? row : null;
+  }
+
+  /**
+   * Find the Cline session a stranded task was running in, so recovery can
+   * RESUME it (keeping Cline's context) instead of restarting from scratch.
+   * First tries the [backseat:task:<id>] prompt marker; falls back (for
+   * tasks that predate the marker) to the newest session whose prompt starts
+   * with this task's prompt AND whose workspace matches the project dir —
+   * the prompt-head check keeps us from ever adopting the user's own
+   * manual chat.
+   */
+  private findResumeSession(
+    task: BridgeTask,
+    cfg: BridgeConfig,
+  ): { sessionId: string; row: any } | null {
+    const marked = this.findBackseatSession(task.id);
+    if (marked) return marked;
+    const projectDir =
+      task.project_dir ||
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
+      cfg.repoPath;
+    const promptHead = (task.prompt || '').slice(0, 80).trim();
+    if (!promptHead) return null;
+    const norm = (v: unknown) =>
+      typeof v === 'string' ? v.replace(/\//g, '\\').toLowerCase() : '';
+    const want = norm(projectDir);
+    const sessions = this.readSessionsIndex();
+    let best: { sessionId: string; row: any } | null = null;
+    let bestStart = '';
+    for (const [sessionId, row] of Object.entries(sessions)) {
+      const r = row as any;
+      if (r?.isSubagent || r?.parentSessionId) continue;
+      const prompt = typeof r?.prompt === 'string' ? r.prompt : '';
+      if (!prompt.includes(promptHead)) continue;
+      if (norm(r?.cwd) !== want && norm(r?.workspaceRoot) !== want) continue;
+      const startedAt = typeof r?.startedAt === 'string' ? r.startedAt : '';
+      if (!best || startedAt >= bestStart) {
+        best = { sessionId, row: r };
+        bestStart = startedAt;
+      }
+    }
+    return best;
+  }
+
+
   /** Pull readable text out of Cline's persisted LLM messages (defensive). */
   private transcriptText(messagesPath: string, maxChars: number): string {
     try {
@@ -1192,12 +1248,93 @@ class BridgeRunner {
     } catch (e: any) {
       return { result: 'failed', output: `startNewTask threw: ${e?.message ?? e}`, exitCode: 1 };
     }
+    this.out.appendLine(`[backseat] starting Cline sidebar task: ${task.id} (fresh)`);
+    return this.watchSidebarTask(cfg, task, api, {
+      sessionId: null,
+      messagesPath: undefined,
+      sentinelPath,
+    });
+  }
 
-    // Find our session in Cline's session store (best-effort; the
-    // done-file handshake below works without it).
-    let sessionId: string | null = null;
-    let messagesPath: string | undefined;
-    {
+  /**
+   * Adopt an existing Cline sidebar session instead of starting a new one:
+   * Cline keeps its full context and just keeps going. The watch loop is
+   * shared with the fresh-start path — done-file first, then terminal
+   * session status, then transcript-error retry (presses Resume), then
+   * stall retry.
+   */
+  private async tryResumeViaClineApi(
+    cfg: BridgeConfig,
+    task: BridgeTask,
+    sessionId: string,
+  ): Promise<{ result: TaskState; output: string; exitCode: number } | null> {
+    const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
+    if (!ext) {
+      this.out.appendLine('[backseat] Cline extension not installed/active.');
+      return null;
+    }
+    let api: ClineApi;
+    try {
+      api = (await ext.activate()) as ClineApi;
+    } catch (e: any) {
+      this.out.appendLine(`[backseat] could not activate Cline extension: ${e?.message}`);
+      return null;
+    }
+    const projectDir =
+      task.project_dir ||
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
+      cfg.repoPath;
+    if (!fs.existsSync(projectDir)) {
+      this.out.appendLine(`[backseat] resume: project_dir does not exist: ${projectDir}`);
+      return null;
+    }
+    const sentinelName = `.backseat-done-${task.id}`;
+    const sentinelPath = path.join(projectDir, sentinelName);
+    // Fast path: Cline may have finished while the runner was dead.
+    try {
+      if (fs.existsSync(sentinelPath)) {
+        const doneContent = fs.readFileSync(sentinelPath, 'utf8');
+        try {
+          fs.unlinkSync(sentinelPath);
+        } catch {
+          /* already gone */
+        }
+        const firstLine = doneContent.split('\n')[0].trim().toUpperCase();
+        const ok = firstLine === 'DONE';
+        this.out.appendLine(
+          `[backseat] resumed task ${task.id}: done-file already present (${firstLine || '(empty)'})`,
+        );
+        return { result: ok ? 'success' : 'failed', output: doneContent.slice(0, 8000), exitCode: ok ? 0 : 1 };
+      }
+    } catch {
+      /* ignore */
+    }
+    const row = this.readSessionRow(sessionId);
+    const messagesPath = typeof row?.messagesPath === 'string' ? row.messagesPath : undefined;
+    this.out.appendLine(`[backseat] resuming Cline session ${sessionId} for ${task.id} (context kept)`);
+    await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) resumed');
+    await pushChanges(cfg.repoPath, `task ${task.id}: resumed`, this.out);
+    return this.watchSidebarTask(cfg, task, api, { sessionId, messagesPath, sentinelPath });
+  }
+
+
+  /**
+   * Watch a Cline sidebar session until it finishes: done-file handshake
+   * first, then terminal session status, then transcript-error retry
+   * (presses Cline's primary button = Resume/Retry), then stall retry.
+   * Shared by fresh starts (sessionId null → discovers via marker) and
+   * resumes (adopts the known session, keeping Cline's context).
+   */
+  private async watchSidebarTask(
+    cfg: BridgeConfig,
+    task: BridgeTask,
+    api: ClineApi,
+    init: { sessionId: string | null; messagesPath?: string; sentinelPath: string },
+  ): Promise<{ result: TaskState; output: string; exitCode: number }> {
+    let sessionId = init.sessionId;
+    let messagesPath = init.messagesPath;
+    const sentinelPath = init.sentinelPath;
+    if (!sessionId) {
       const foundBy = Date.now() + 90_000;
       while (!sessionId && Date.now() < foundBy) {
         const found = this.findBackseatSession(task.id);
@@ -1264,11 +1401,11 @@ class BridgeRunner {
       let status: string | undefined;
       let transcriptTail = '';
       if (sessionId) {
-        const found = this.findBackseatSession(task.id);
-        if (found && found.sessionId === sessionId) {
-          status = typeof found.row?.status === 'string' ? found.row.status : undefined;
-          if (!messagesPath && typeof found.row?.messagesPath === 'string') {
-            messagesPath = found.row.messagesPath;
+        const row = this.readSessionRow(sessionId);
+        if (row) {
+          status = typeof row?.status === 'string' ? row.status : undefined;
+          if (!messagesPath && typeof row?.messagesPath === 'string') {
+            messagesPath = row.messagesPath;
           }
         }
         if (messagesPath) {
@@ -1336,7 +1473,6 @@ class BridgeRunner {
       }
     }
   }
-
   // -- Cline CLI fallback path ---------------------------------------------
 
   /**
@@ -1684,10 +1820,21 @@ class BridgeRunner {
       if (hbMs && Date.now() - hbMs <= STALE_MS) continue; // live runner — hands off
       try {
         delete task.claimed_by;
+        // Prefer RESUMING the stranded Cline session (keeps its context)
+        // over restarting from scratch. Falls back to a fresh start when
+        // no session can be matched.
+        const resume = this.findResumeSession(task, cfg);
+        if (resume) {
+          task.resume_session = resume.sessionId;
+          this.out.appendLine(
+            `[backseat] recovered orphaned task ${task?.id ?? f} -> pending (will resume Cline session ${resume.sessionId})`,
+          );
+        } else {
+          this.out.appendLine(`[backseat] recovered orphaned task ${task?.id ?? f} -> pending (fresh start)`);
+        }
         writeJsonAtomic(path.join(pendingDir, f), task);
         fs.unlinkSync(activePath);
         recovered++;
-        this.out.appendLine(`[backseat] recovered orphaned task ${task?.id ?? f} -> pending`);
       } catch (e: any) {
         this.out.appendLine(`[backseat] could not recover ${f}: ${e?.message ?? e}`);
       }
