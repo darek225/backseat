@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.10] - 2026-09-28
+### Fixed
+- Activity-bar icon rendered as a solid square. The view container was
+  pointing at `images/icon.png`; VS Code renders activity-bar icons as a
+  theme-colored mask, so a mostly-opaque PNG degrades to a solid square.
+  New `images/activity-icon.svg`: a monochrome steering-wheel glyph with
+  code brackets on a transparent background. The marketplace/extension icon
+  stays the full-color PNG. Added `test/packaging.test.cjs` asserting the
+  container icon is an on-disk SVG and is not excluded by `.vscodeignore`.
+
 ## [0.9.9] - 2026-09-28
 ### Added
 - Transcript tail in done records. On every terminal outcome (success,
