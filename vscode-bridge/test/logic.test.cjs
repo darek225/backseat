@@ -302,3 +302,94 @@ test('isClaimedByDeadRunner: dead pid reclaims', () => {
   assert.equal(logic.isClaimedByDeadRunner('legacy-claim-without-pid', () => false), false);
   assert.equal(logic.isClaimedByDeadRunner('', () => false), false);
 });
+
+test('transcriptTail: renders both message shapes as compact lines', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  const messages = [
+    { ts: 1, type: 'say', say: 'text', text: 'I will add the placement rules now.' },
+    { ts: 2, type: 'ask', ask: 'api_req_failed', text: 'provider rejected the request: invalid request' },
+    { role: 'assistant', content: [{ type: 'text', text: 'Retrying with a smaller edit.' }] },
+  ];
+  fs.writeFileSync(p, JSON.stringify(messages));
+  const tail = logic.transcriptTail(p);
+  assert.ok(tail.includes('[say:text] I will add the placement rules now.'), 'say line, got: ' + tail);
+  assert.ok(tail.includes('[ask:api_req_failed] provider rejected the request'), 'ask line');
+  assert.ok(tail.includes('[assistant] Retrying with a smaller edit.'), 'Anthropic line');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptTail: empty transcript yields empty string', () => {
+  assert.equal(logic.transcriptTail('/nonexistent/messages.json'), '');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  fs.writeFileSync(p, JSON.stringify([]));
+  assert.equal(logic.transcriptTail(p), '');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptTail: bounded with truncation marker on long transcripts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  const messages = [];
+  for (let i = 0; i < 60; i++) {
+    messages.push({ ts: i, type: 'say', say: 'text', text: `progress update number ${i}: ` + 'x'.repeat(200) });
+  }
+  messages.push({ ts: 61, type: 'say', say: 'text', text: 'FINAL-MARKER final message' });
+  fs.writeFileSync(p, JSON.stringify(messages));
+  const tail = logic.transcriptTail(p);
+  assert.ok(tail.length <= 3000, `bounded to 3000 chars, got ${tail.length}`);
+  assert.ok(tail.includes('[... earlier transcript omitted ...]'), 'truncation marker present');
+  assert.ok(tail.includes('FINAL-MARKER'), 'most recent message kept');
+  assert.ok(!tail.includes('progress update number 0:'), 'oldest messages dropped');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptTail: no truncation marker when transcript fits', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  fs.writeFileSync(p, JSON.stringify([
+    { ts: 1, type: 'say', say: 'text', text: 'short one' },
+    { ts: 2, type: 'say', say: 'text', text: 'short two' },
+  ]));
+  const tail = logic.transcriptTail(p);
+  assert.ok(!tail.includes('omitted'), 'no truncation marker for short transcript');
+  assert.ok(tail.includes('short one') && tail.includes('short two'));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptStats: counts messages and errors', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  fs.writeFileSync(p, JSON.stringify([
+    { ts: 1, type: 'say', say: 'text', text: 'working' },
+    { ts: 2, type: 'ask', ask: 'api_req_failed', text: 'provider rejected the request' },
+    { ts: 3, type: 'ask', ask: 'api_req_failed', text: '429 rate limit' },
+  ]));
+  const stats = logic.transcriptStats(p);
+  assert.deepEqual(stats, { messages: 3, errorsSeen: 2 });
+  assert.deepEqual(logic.transcriptStats('/nonexistent/messages.json'), { messages: 0, errorsSeen: 0 });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('attachTranscriptTail: timeout-shaped task gets tail and stats', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backseat-test-'));
+  const p = path.join(dir, 'messages.json');
+  fs.writeFileSync(p, JSON.stringify([
+    { ts: 1, type: 'say', say: 'text', text: 'editing index.html scoring' },
+    { ts: 2, type: 'say', say: 'text', text: 'verifying game-end logic' },
+  ]));
+  const task = { id: 't1', result: 'timeout', exit_code: 124 };
+  const out = logic.attachTranscriptTail(task, p);
+  assert.equal(out.result, 'timeout', 'original fields preserved');
+  assert.ok(typeof out.transcript_tail === 'string' && out.transcript_tail.includes('verifying game-end logic'));
+  assert.deepEqual(out.transcript_stats, { messages: 2, errorsSeen: 0 });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('attachTranscriptTail: no messagesPath leaves task unchanged', () => {
+  const task = { id: 't2', result: 'success' };
+  const out = logic.attachTranscriptTail(task, undefined);
+  assert.ok(!('transcript_tail' in out), 'no tail field added');
+  assert.ok(!('transcript_stats' in out), 'no stats field added');
+});
