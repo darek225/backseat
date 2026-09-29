@@ -196,8 +196,13 @@ behind it. When one lands in `tasks/done/` with `result: failed`, read
   and queue the pieces. Never re-queue the same oversized prompt.
 - `transient` (retries exhausted) → re-queue the task once more. If it fails
   again, stop and tell the user — don't loop forever.
-- `failed` / `timeout` → read `error`, fix the prompt or the project setup
-  (wrong path, missing dependency, ambiguous instruction), then re-queue.
+- `failed` / `timeout` → read `error` AND `transcript_tail` (v0.9.9+
+  attaches the tail of the Cline transcript to every done record — it shows
+  what Cline was doing when the task ended). Fix the prompt or the project
+  setup based on what you see there, then re-queue. Standing rule: if the
+  extension knows it, the bridge records it — keep every done/status record
+  sufficient for the Muse side to answer "what happened?" from the bridge
+  repo alone.
 - Hard rule: never re-queue the same failing task more than 3 times total.
   After that, stop and explain what's wrong in plain words.
 - Stall recovery: a task stuck in `tasks/active/` with `heartbeat_at` more
