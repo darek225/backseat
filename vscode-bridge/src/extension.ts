@@ -40,6 +40,7 @@ import {
   utcnow,
   transcriptText,
   transcriptInfo,
+  attachTranscriptTail,
   TRANSCRIPT_ERROR_RE,
   transcriptErrorAction,
   isAwaitingUserAsk,
@@ -92,6 +93,24 @@ interface BridgeTask {
   started_at?: string;
   finished_at?: string;
   error?: string | null;
+  // transcript tail: last Cline session messages at completion, so the
+  // Muse side can see where Cline got stuck (especially on timeout).
+  // Additive and optional — absent on CLI-path and command tasks.
+  transcript_tail?: string;
+  transcript_stats?: { messages: number; errorsSeen: number };
+}
+
+/**
+ * Outcome of a Cline sidebar run. `messagesPath` carries the session
+ * transcript location so finishTask can attach `transcript_tail` /
+ * `transcript_stats` to the done record — undefined when no transcript
+ * was ever found (done-file-only fast path).
+ */
+interface SidebarOutcome {
+  result: TaskState;
+  output: string;
+  exitCode: number;
+  messagesPath?: string;
 }
 
 interface BridgeConfig {
@@ -790,6 +809,7 @@ class BridgeRunner {
     let result: TaskState = 'failed';
     let output = '';
     let exitCode = 1;
+    let messagesPath: string | undefined;
     let errorKind: ErrorKind = 'failed';
 
     // Retry loop: transient failures (rate limits, network blips) get
@@ -811,7 +831,7 @@ class BridgeRunner {
           : await this.tryRunViaClineApi(cfg, task, prompt);
         if (viaApi) {
           via = 'api';
-          ({ result, output, exitCode } = viaApi);
+          ({ result, output, exitCode, messagesPath } = viaApi);
           errorKind = result === 'success' ? 'failed' : classifyError(output);
           if (result === 'timeout') {
             // The API task may still be working in the sidebar — never
@@ -856,7 +876,7 @@ class BridgeRunner {
     this.out.appendLine(
       `[backseat] task ${task.id} finished: ${result} (exit ${exitCode}, ${Math.round((Date.now() - startedAt) / 1000)}s)`,
     );
-    await this.finishTask(cfg, task, result, output, exitCode);
+    await this.finishTask(cfg, task, result, output, exitCode, messagesPath);
   }
 
   // -- VS Code command tasks ----------------------------------------------
@@ -1195,7 +1215,7 @@ class BridgeRunner {
     cfg: BridgeConfig,
     task: BridgeTask,
     prompt: string,
-  ): Promise<{ result: TaskState; output: string; exitCode: number } | null> {
+  ): Promise<SidebarOutcome | null> {
     const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
     if (!ext) {
       this.out.appendLine('[backseat] Cline extension not installed/active.');
@@ -1272,7 +1292,7 @@ class BridgeRunner {
     cfg: BridgeConfig,
     task: BridgeTask,
     sessionId: string,
-  ): Promise<{ result: TaskState; output: string; exitCode: number } | null> {
+  ): Promise<SidebarOutcome | null> {
     const ext = vscode.extensions.getExtension(CLINE_EXTENSION_ID);
     if (!ext) {
       this.out.appendLine('[backseat] Cline extension not installed/active.');
@@ -1416,7 +1436,7 @@ class BridgeRunner {
     task: BridgeTask,
     api: ClineApi,
     init: { sessionId: string | null; messagesPath?: string; sentinelPath: string },
-  ): Promise<{ result: TaskState; output: string; exitCode: number }> {
+  ): Promise<SidebarOutcome> {
     let sessionId = init.sessionId;
     let messagesPath = init.messagesPath;
     const sentinelPath = init.sentinelPath;
@@ -1496,6 +1516,7 @@ class BridgeRunner {
             result: 'cancelled',
             output: 'cancelled remotely via the bridge repo; the done record was written by the cancelling side',
             exitCode: 0,
+            messagesPath: messagesPath || undefined,
           };
         }
       }
@@ -1556,7 +1577,7 @@ class BridgeRunner {
         const output = transcriptTail
           ? `Cline session ${status}. Last transcript:\n${transcriptTail}`
           : `Cline session ${status} (no transcript available).`;
-        return { result: ok ? 'success' : 'failed', output: output.slice(0, 8000), exitCode: ok ? 0 : 1 };
+        return { result: ok ? 'success' : 'failed', output: output.slice(0, 8000), exitCode: ok ? 0 : 1, messagesPath: messagesPath || undefined };
       }
 
       // 2b. Provider error visible in the transcript + quiet spell -> press
@@ -1641,6 +1662,7 @@ class BridgeRunner {
             'Timed out waiting for the Cline sidebar task (no done-file, no terminal session status). ' +
             'Cline may still be working — check the sidebar.',
           exitCode: 124,
+          messagesPath: messagesPath || undefined,
         };
       }
     }
@@ -1759,6 +1781,7 @@ class BridgeRunner {
     result: TaskState,
     output: string,
     exitCode: number,
+    messagesPath?: string,
   ): Promise<void> {
     task.result = result;
     task.exit_code = exitCode;
@@ -1768,6 +1791,11 @@ class BridgeRunner {
     } else {
       task.error = null;
     }
+    // Attach the transcript tail to EVERY terminal outcome (success,
+    // failed, timeout, cancelled) so the Muse side can see where Cline
+    // got stuck. Additive and optional — CLI/command paths have no
+    // transcript. The tail stays in the private bridge repo; never log it.
+    task = attachTranscriptTail(task, messagesPath);
 
     const activePath = path.join(cfg.repoPath, 'tasks', 'active', `${task.id}.json`);
     const donePath = path.join(cfg.repoPath, 'tasks', 'done', `${task.id}.json`);

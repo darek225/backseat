@@ -288,18 +288,45 @@ export interface TranscriptInfo {
   lastKind: string;
 }
 
-export function transcriptInfo(messagesPath: string, maxChars: number): TranscriptInfo {
+/**
+ * One parsed, renderable transcript message. `label` is the compact
+ * display tag (e.g. "say:text", "ask:api_req_failed", "assistant");
+ * `kind` is the machine-usable sub-kind (e.g. "api_req_failed").
+ */
+export interface TranscriptChunk {
+  label: string;
+  kind: string;
+  text: string;
+}
+
+/**
+ * Parse a Cline session messages file into renderable chunks. Pure and
+ * shared by transcriptInfo/transcriptTail/transcriptStats — handles BOTH
+ * shapes: ClineMessage ({type:'say'|'ask', say/ask, text}) and
+ * Anthropic-style ({role, content:[...]}). Returns [] on any read/parse
+ * failure (never throws).
+ */
+export function parseTranscriptChunks(messagesPath: string): TranscriptChunk[] {
   try {
     const raw = fs.readFileSync(messagesPath, 'utf8');
     const parsed = JSON.parse(raw);
     const messages = Array.isArray(parsed) ? parsed : (parsed as any)?.messages;
-    if (!Array.isArray(messages) || messages.length === 0) return { text: '', lastKind: '' };
-    const chunks: { kind: string; text: string }[] = [];
-    for (const m of messages.slice(-8)) {
+    if (!Array.isArray(messages) || messages.length === 0) return [];
+    const chunks: TranscriptChunk[] = [];
+    for (const m of messages) {
       const anyM = m as any;
       if (typeof anyM?.text === 'string' && anyM.text.trim()) {
-        const kind = anyM?.say || anyM?.ask || anyM?.type || 'msg';
-        chunks.push({ kind, text: `${kind}: ${anyM.text.trim()}`.slice(0, 1200) });
+        const type = typeof anyM?.type === 'string' && anyM.type ? anyM.type : 'msg';
+        const sub = typeof anyM?.say === 'string' && anyM.say
+          ? anyM.say
+          : typeof anyM?.ask === 'string' && anyM.ask
+            ? anyM.ask
+            : '';
+        chunks.push({
+          label: sub ? `${type}:${sub}` : type,
+          kind: sub || type,
+          text: anyM.text.trim().slice(0, 1200),
+        });
         continue;
       }
       const role = typeof anyM?.role === 'string' ? anyM.role : '';
@@ -311,22 +338,105 @@ export function transcriptInfo(messagesPath: string, maxChars: number): Transcri
           : [];
       for (const b of blocks) {
         if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-          chunks.push({ kind: role || 'msg', text: `${role}: ${b.text.trim()}`.slice(0, 1200) });
+          chunks.push({ label: role || 'msg', kind: role || 'msg', text: b.text.trim().slice(0, 1200) });
         } else if (b && b.type === 'tool_use' && typeof b.name === 'string') {
-          chunks.push({ kind: role || 'msg', text: `${role} using tool: ${b.name}` });
+          const t = `${role || 'msg'} using tool: ${b.name}`;
+          chunks.push({ label: role || 'msg', kind: role || 'msg', text: t });
         }
       }
     }
-    const lastKind = chunks.length ? chunks[chunks.length - 1].kind : '';
-    return { text: chunks.map((c) => c.text).join('\n').slice(-maxChars), lastKind };
+    return chunks;
   } catch {
-    return { text: '', lastKind: '' };
+    return [];
   }
+}
+
+export function transcriptInfo(messagesPath: string, maxChars: number): TranscriptInfo {
+  const chunks = parseTranscriptChunks(messagesPath);
+  // Keep the historical rendering: "<kind>: <text>" over the last 8
+  // messages, cut to maxChars from the end.
+  const tail = chunks.slice(-8).map((c) => `${c.kind}: ${c.text}`);
+  const lastKind = chunks.length ? chunks[chunks.length - 1].kind : '';
+  return { text: tail.join('\n').slice(-maxChars), lastKind };
 }
 
 /** Backwards-compatible text-only wrapper. */
 export function transcriptText(messagesPath: string, maxChars: number): string {
   return transcriptInfo(messagesPath, maxChars).text;
+}
+
+export const TRANSCRIPT_TAIL_MAX_CHARS = 3000;
+export const TRANSCRIPT_TAIL_MAX_MESSAGES = 12;
+const TRANSCRIPT_TAIL_OMITTED = '[... earlier transcript omitted ...]';
+
+/**
+ * Render the last N transcript messages as compact one-per-line entries
+ * like "[say:text] ..." / "[ask:api_req_failed] ...", bounded to
+ * ~3000 chars total. When the transcript is longer, older messages are
+ * dropped and a clear truncation marker heads the output. Empty
+ * transcript → empty string. Never throws.
+ *
+ * This is what lands in tasks/done/<id>.json as `transcript_tail` so the
+ * Muse side can see where Cline got stuck — especially on timeouts, where
+ * the done record previously said nothing useful.
+ */
+export function transcriptTail(
+  messagesPath: string,
+  maxMessages: number = TRANSCRIPT_TAIL_MAX_MESSAGES,
+  maxChars: number = TRANSCRIPT_TAIL_MAX_CHARS,
+): string {
+  const chunks = parseTranscriptChunks(messagesPath);
+  if (!chunks.length) return '';
+  const tail = chunks.slice(-Math.max(1, maxMessages));
+  const lines = tail.map((c) => {
+    const oneLine = c.text.replace(/\s+/g, ' ').trim().slice(0, 240);
+    return `[${c.label}] ${oneLine}`;
+  });
+  let out = lines.join('\n');
+  const omitted = chunks.length - tail.length;
+  if (out.length > maxChars) {
+    out = TRANSCRIPT_TAIL_OMITTED + '\n' + out.slice(-(maxChars - TRANSCRIPT_TAIL_OMITTED.length - 1));
+  } else if (omitted > 0) {
+    out = TRANSCRIPT_TAIL_OMITTED + '\n' + out;
+    if (out.length > maxChars) {
+      out = out.slice(0, maxChars);
+    }
+  }
+  return out;
+}
+
+export interface TranscriptStats {
+  messages: number;
+  errorsSeen: number;
+}
+
+/** Cheap counts over the whole transcript: parsed messages and how many
+ *  chunks match the provider-error regex. Never throws. */
+export function transcriptStats(messagesPath: string): TranscriptStats {
+  const chunks = parseTranscriptChunks(messagesPath);
+  let errorsSeen = 0;
+  for (const c of chunks) {
+    if (TRANSCRIPT_ERROR_RE.test(c.text) || TRANSCRIPT_ERROR_RE.test(c.label)) errorsSeen++;
+  }
+  return { messages: chunks.length, errorsSeen };
+}
+
+/**
+ * Attach `transcript_tail` + `transcript_stats` to a done-record-shaped
+ * task object. Additive and backward compatible: with no messagesPath
+ * the task is returned unchanged. The tail stays in the private bridge
+ * repo — callers must never print it to logs.
+ */
+export function attachTranscriptTail<T>(
+  task: T,
+  messagesPath?: string,
+): T & { transcript_tail?: string; transcript_stats?: TranscriptStats } {
+  if (!messagesPath) return task as T & { transcript_tail?: string; transcript_stats?: TranscriptStats };
+  return {
+    ...task,
+    transcript_tail: transcriptTail(messagesPath),
+    transcript_stats: transcriptStats(messagesPath),
+  };
 }
 
 /**

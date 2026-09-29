@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.9] - 2026-09-28
+### Added
+- Transcript tail in done records. On every terminal outcome (success,
+  failed, timeout, cancelled) the done JSON now carries `transcript_tail`
+  (the last ~12 Cline session messages as compact `[say:text]` /
+  `[ask:api_req_failed]` lines, bounded to ~3000 chars with a truncation
+  marker) and `transcript_stats` (`{messages, errorsSeen}`). Previously a
+  timeout record said only "timed out waiting for the Cline sidebar task",
+  leaving the Muse side blind to what Cline was doing. Pure
+  `transcriptTail`/`transcriptStats`/`attachTranscriptTail` helpers in
+  logic.ts reuse the existing dual-shape transcript parsing; the sidebar
+  watch loop threads the session's messagesPath through to finishTask.
+  Additive and backward compatible — CLI/command tasks omit both fields,
+  and transcripts stay in the private bridge repo (never logged).
+  protocol.md documents the fields and the new guidance: on timeout, read
+  `transcript_tail` to see where Cline got stuck before re-queueing.
+
 ## [0.9.8] - 2026-09-28
 ### Fixed
 - Remote cancel no longer wedges the bridge. In 0.9.7 the cancelled

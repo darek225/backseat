@@ -87,9 +87,27 @@ Created by Muse. Moved (not copied) through `active` → `done` by the watcher.
   "error_kind": "transient",           // "transient" | "no_credits" | "context_overflow" | "timeout" | "failed"
   "started_at": "2026-09-28T00:31:05Z",
   "finished_at": "2026-09-28T00:44:12Z",
-  "error": null                        // string | null, human-readable failure reason
+  "error": null,                       // string | null, human-readable failure reason
+  "transcript_tail": "[say:text] ...", // last Cline session messages at completion
+  "transcript_stats": { "messages": 42, "errorsSeen": 1 }
 }
 ```
+
+**`transcript_tail` / `transcript_stats` (0.9.9+):** on every terminal
+outcome (success, failed, timeout, cancelled) the watcher appends the last
+~12 Cline session messages as compact lines like `[say:text] ...` /
+`[ask:api_req_failed] ...`, bounded to ~3000 chars with a
+`[... earlier transcript omitted ...]` marker when truncated, plus message
+and provider-error counts. Additive and optional — CLI-path and command
+tasks have no transcript and omit both fields. Transcripts live only in
+the private bridge repo (never in logs).
+
+On a **timeout**, read `transcript_tail` before deciding what to do next:
+it shows where Cline actually got stuck (mid-edit, provider-error loop,
+awaiting input, or genuinely still working). Re-queue a narrower task
+targeted at what the tail shows instead of blindly repeating the same
+open-ended prompt — repeating the same prompt usually times out the same
+way.
 
 **Rules:**
 
