@@ -96,7 +96,7 @@
         {
           "id": "backseat",
           "title": "Backseat",
-          "icon": "images/icon.png"
+          "icon": "images/activity-icon.svg"
         }
       ]
     }
@@ -125,6 +125,6 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.9",
+  "version": "0.9.10",
   "icon": "images/icon.png"
 }
