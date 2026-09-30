@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0D1B3E"/>
+      <stop offset="1" stop-color="#081226"/>
+    </linearGradient>
+    <linearGradient id="wheel" gradientUnits="userSpaceOnUse" x1="58" y1="0" x2="182" y2="0">
+      <stop offset="0" stop-color="#34F5A5"/>
+      <stop offset="1" stop-color="#5CC8FF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.22" r="0.95">
+      <stop offset="0" stop-color="#2E5CFF" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#2E5CFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="6" y="6" width="228" height="228" rx="54" fill="url(#bg)"/>
+  <rect x="6" y="6" width="228" height="228" rx="54" fill="url(#glow)"/>
+  <rect x="6.75" y="6.75" width="226.5" height="226.5" rx="53" fill="none" stroke="#7FB2FF" stroke-opacity="0.28" stroke-width="1.5"/>
+  <g fill="none" stroke="url(#wheel)" stroke-width="15" stroke-linecap="round">
+    <path d="M176.4 105.5 A60 60 0 1 1 140.5 69.6"/>
+    <path d="M120 126 L67 117"/>
+    <path d="M120 126 L173 117"/>
+    <path d="M120 126 L120 179"/>
+  </g>
+  <circle cx="162.4" cy="83.6" r="8.5" fill="#5CC8FF"/>
+  <circle cx="120" cy="126" r="13" fill="url(#wheel)"/>
+  <circle cx="120" cy="126" r="5" fill="#0A1730"/>
+</svg>

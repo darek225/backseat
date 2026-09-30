@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.12] - 2026-09-30
+### Changed
+- Unified brand logo: a single vector steering-wheel mark (rim with a
+  remote-node gap, mint-to-cyan gradient) now backs every surface — the
+  Marketplace icon (`images/icon.png`), the activity-bar glyph
+  (`images/activity-icon.svg`, same geometry in monochrome), the README
+  branding (`images/logo.png`, from `images/logo.svg`), and the demo
+  video/GIF. Source SVGs live alongside the renders in `images/`.
+
 ## [0.9.11] - 2026-09-30
 ### Changed
 - Marketplace listing prep: the extension README is now user-facing listing
