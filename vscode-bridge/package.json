@@ -3,6 +3,7 @@
     "onStartupFinished"
   ],
   "categories": [
+    "Machine Learning",
     "Other"
   ],
   "contributes": {
@@ -102,6 +103,25 @@
     }
   },
   "description": "Backseat-drive your Cline coding agent from your phone. Polls the bridge repo for architect tasks from Muse and runs them through Cline.",
+  "keywords": [
+    "cline",
+    "claude",
+    "ai",
+    "coding-agent",
+    "agent",
+    "remote",
+    "automation",
+    "github"
+  ],
+  "homepage": "https://github.com/darek225/backseat#readme",
+  "bugs": {
+    "url": "https://github.com/darek225/backseat/issues"
+  },
+  "galleryBanner": {
+    "color": "#0a0e16",
+    "theme": "dark"
+  },
+  "qna": false,
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
@@ -125,6 +145,6 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.10",
+  "version": "0.9.11",
   "icon": "images/icon.png"
 }

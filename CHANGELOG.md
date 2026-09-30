@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.11] - 2026-09-30
+### Changed
+- Marketplace listing prep: the extension README is now user-facing listing
+  copy (setup, commands, security model, limitations) with an animated
+  demo GIF, and `package.json` carries Marketplace metadata — Machine
+  Learning + Other categories, Cline/Claude/agent keywords, homepage,
+  issue tracker, and a dark gallery banner.
+
 ## [0.9.10] - 2026-09-28
 ### Fixed
 - Activity-bar icon rendered as a solid square. The view container was
