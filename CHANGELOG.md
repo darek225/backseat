@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.13] - 2026-09-30
+### Changed
+- Agent-agnostic positioning: Backseat is an open protocol (git + JSON),
+  not a Claude product. It was designed and dogfooded with Muse in the
+  architect seat, but any agentic AI that can clone a repo, write JSON task
+  files, and push commits (Muse, Grok, Dots, Clawdbot, …) can drive.
+  All surfaces now say so: the GitHub README and Marketplace listing lead
+  with "your agent", `protocol.md` names the writer "the architect"
+  instead of "Muse", `MUSE.md` carries a portability note, and a new
+  root `AGENTS.md` gives non-Muse agents the same setup brief.
+  Extension description/keywords updated to match (adds `grok`, `ai-agent`).
+  No behavior change — docs and metadata only.
+
 ## [0.9.12] - 2026-09-30
 ### Changed
 - Unified brand logo: a single vector steering-wheel mark (rim with a

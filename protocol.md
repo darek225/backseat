@@ -8,11 +8,11 @@ in the repo.
 
 | Directory        | Written by | Meaning                                  |
 |------------------|------------|------------------------------------------|
-| `tasks/pending/` | Muse       | Queued tasks, not yet claimed             |
+| `tasks/pending/` | Architect       | Queued tasks, not yet claimed             |
 | `tasks/active/`  | Watcher    | Claimed; exactly one task runs at a time  |
 | `tasks/done/`    | Watcher    | Finished (success, failure, or cancelled) |
 | `tasks/status/`  | Watcher    | Live status per task id (updated often)   |
-| `reports/`         | Muse       | Morning digests (`YYYY-MM-DD-digest.md`)  |
+| `reports/`         | Architect       | Morning digests (`YYYY-MM-DD-digest.md`)  |
 | `projects.json`    | Both       | Nickname → PC path map for projects       |
 | `notify.json`      | Watcher    | ntfy.sh topic for instant pings, both directions (optional) |
 
@@ -30,15 +30,15 @@ set `backseat.notifyTopic` in VS Code to any unguessable string (e.g.
 }
 ```
 
-**PC → Muse (task finished):** on every task completion the extension POSTs
+**PC → Architect (task finished):** on every task completion the extension POSTs
 a small "task finished" message to `https://ntfy.sh/<topic>` (free, no
-account). Muse's fast path: read the topic from `notify.json`, then poll
+account). The architect's fast path: read the topic from `notify.json`, then poll
 `https://ntfy.sh/<topic>/json?since=<last-seen-id>` for new pings instead of
 blind git polling. Git remains the source of truth — a lost ping is harmless
 because the next git poll catches up. The ping payload carries only the task
 id, title, and result; never any secrets.
 
-**Muse → PC (new task wake-up):** after pushing a task file, the Muse side
+**Architect → PC (new task wake-up):** after pushing a task file, the architect side
 POSTs a one-line ping to the same topic:
 
 ```
@@ -56,11 +56,11 @@ git polling alone.
 
 File names are always `<task-id>.json`. Task ids are short, unique,
 filesystem-safe strings, e.g. `20260928-001-auth` or a short uuid hex.
-Muse generates the id when queueing.
+The architect generates the id when queueing.
 
 ## Task JSON (`tasks/pending/<id>.json`)
 
-Created by Muse. Moved (not copied) through `active` → `done` by the watcher.
+Created by the architect. Moved (not copied) through `active` → `done` by the watcher.
 
 ```jsonc
 {
@@ -76,7 +76,7 @@ Created by Muse. Moved (not copied) through `active` → `done` by the watcher.
 
   // Optional
   "title": "Add login page",           // short human title for status messages
-  "notes": "Muse's extra context for the human, not sent to cline",
+  "notes": "the architect's extra context for the human, not sent to cline",
   "labels": ["frontend"],              // free-form tags
   "max_retries": 2,                    // integer, retries for transient failures (default 2)
 
@@ -117,7 +117,7 @@ way.
   files as shareable text.
 - The watcher processes tasks in filename (lexicographic) order — oldest
   first if ids are timestamp-prefixed like `20260928-001-...`.
-- To cancel a pending task, Muse moves it to `tasks/done/` with
+- To cancel a pending task, the architect moves it to `tasks/done/` with
   `"result": "cancelled"` and does not touch `tasks/status/`.
 
 ## Command tasks (`kind: "command"`)
@@ -158,18 +158,18 @@ paths (`{"blog": "C:\\Users\\Darek\\code\\blog"}`). Prefer `args.project`
 over raw paths — a nickname can't typo-delete the wrong folder. After a
 successful `openProject`/`newProject`, the extension writes the nickname →
 path mapping into `projects.json` itself, so the map stays current without
-Muse having to maintain it.
+the architect having to maintain it.
 
 **Safety rules for `deleteProject`:**
 
-- Refused unless `"confirm": "delete"` is exactly present — Muse must ask
+- Refused unless `"confirm": "delete"` is exactly present — the architect must ask
   the user before setting it.
 - The watcher refuses to delete the home directory, the bridge repo clone,
   filesystem roots, and anything that doesn't exist.
 - Prefer `openProject`/`newProject` for daily use; deletion is the exception.
 
 Command tasks flow through the same `pending → active → done` lifecycle and
-`tasks/status/` heartbeats as Cline tasks, so Muse reports them the same way.
+`tasks/status/` heartbeats as Cline tasks, so the architect reports them the same way.
 
 ## Status JSON (`tasks/status/<id>.json`)
 
@@ -194,11 +194,11 @@ This is the fast path for "what's happening right now".
 - `log_tail` is truncated to the last ~40 lines / ~8 KB so the file stays small.
 - On completion the watcher writes the terminal state (`success`,
   `failed`, `cancelled`, `timeout`) once more, then stops updating it.
-- Muse never writes status files; it only reads them.
+- The architect never writes status files; it only reads them.
 
 ## Example: full lifecycle
 
-1. Muse writes `tasks/pending/20260928-001-auth.json` (`result` absent),
+1. The architect writes `tasks/pending/20260928-001-auth.json` (`result` absent),
    commits, pushes.
 2. Watcher pulls, sees the pending task, `git mv` to `tasks/active/`,
    commits, pushes. Writes `tasks/status/20260928-001-auth.json` with
@@ -207,7 +207,7 @@ This is the fast path for "what's happening right now".
    updates status to `running` + heartbeats, pushes every ~30s.
 4. Cline exits 0. Watcher adds `result: "success"`, timestamps, moves
    task JSON to `tasks/done/`, writes final status `success`, pushes.
-5. Muse's poller sees the done task + final status, reports to Darek.
+5. The architect's poller sees the done task + final status, reports to Darek.
 
 ## Failure handling
 Cline runs fail for flaky reasons (rate limits, network blips, overloaded
@@ -218,19 +218,19 @@ models). The watcher retries instead of stalling:
 | `transient` | Rate limit, 429, overloaded, network error | Retries with backoff (2 min, then 10 min), up to `max_retries` (default 2) |
 | `timeout` | Cline exceeded `timeout_sec` | Retried like transient on the CLI path (the process was killed, so it's safe). Never auto-retried on the extension-API path — the task may still be running in the sidebar, and retrying would run the prompt twice |
 | `no_credits` | Out of credits / quota / billing | Fails immediately, no retries — retrying can't help |
-| `context_overflow` | Context / token limit exceeded | Fails immediately — retrying the same prompt would fail identically; Muse splits the task instead |
-| `failed` | Anything else | Fails immediately; Muse triages |
+| `context_overflow` | Context / token limit exceeded | Fails immediately — retrying the same prompt would fail identically; the architect splits the task instead |
+| `failed` | Anything else | Fails immediately; architect triages |
 
 The retry loop is interruptible: stopping the bridge during backoff marks the
 task failed rather than hanging. `attempts` records the total tries.
 
-**Stall recovery (Muse side):** if a task sits in `tasks/active/` with
+**Stall recovery (architect side):** if a task sits in `tasks/active/` with
 `heartbeat_at` more than ~15 minutes stale, the PC side died (VS Code
 closed, PC asleep, crash). Move the task JSON back to `tasks/pending/` for a
 fresh attempt — but only after that staleness threshold, to avoid double-running
 a task that's merely slow.
 
-**Cancelling a running task (Muse side, v0.9.7+):** the extension runs one
+**Cancelling a running task (architect side, v0.9.7+):** the extension runs one
 task at a time, and a stuck watcher would otherwise block the queue until
 its `timeout_sec` expires. To cancel remotely with pure git (no extra
 setup, no ntfy needed):
@@ -268,7 +268,7 @@ A rejected push with *no* winner's claim on origin is transient
 ## Clock skew
 
 All timestamps are UTC ISO-8601 (`datetime.now(timezone.utc)`).
-The watcher and Muse don't need synchronized clocks beyond roughly —
+The watcher and architect don't need synchronized clocks beyond roughly —
 `heartbeat_at` staleness (>120s without update while `state` is
-`running`) means the watcher probably died; Muse should report the
+`running`) means the watcher probably died; the architect should report the
 task as stalled.
