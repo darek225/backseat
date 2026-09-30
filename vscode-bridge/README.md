@@ -1,130 +1,86 @@
-# Backseat — VS Code extension (PC side)
+# Backseat
 
-This is the PC side of the bridge, as a VS Code extension. While VS Code is
-open it polls the private bridge GitHub repo for pending architect tasks from
-Muse, hands each prompt to Cline, and pushes status and results back. Close
-VS Code and the bridge is off — nothing runs in the background.
+**Backseat-drive your Cline coding agent from your phone.**
 
-The task protocol (`tasks/pending` → `tasks/active` → `tasks/done`, plus
-`tasks/status/<id>.json`) is documented in `../protocol.md` and unchanged.
+![Backseat demo](images/demo.gif)
 
-## Install on your PC
+Chat with Muse anywhere — your PC does the coding. You architect from the
+couch; Cline builds in VS Code. No servers, no open ports, no shared API
+keys. GitHub is the only wire.
 
-Prerequisites: VS Code with the Cline extension installed and signed in
-(Cline holds your DeepSeek key — this extension never sees it), plus Git.
-
-```bat
-cd C:\Users\<you>\muse-cline-bridge\vscode-bridge
-npm install
-npm run compile
+```text
+you (phone) ──chat──▶ Muse (architect) ──git──▶ Backseat extension ──▶ Cline (builder)
+   "add a login page"      queues tasks          runs them on your PC     in VS Code
 ```
 
-Then either:
+## What it does
 
-- **Run it unpacked:** open this folder in VS Code and press `F5` (Extension
-  Development Host), or
-- **Package it:** `npx vsce package` then install the `.vsix` via
-  `Extensions → … → Install from VSIX`.
+Backseat turns a private GitHub repo into a task queue between you, Muse,
+and Cline:
 
-## Configure
+- You describe work in plain language from your phone.
+- Muse writes it up as a task in your private bridge repo.
+- This VS Code extension picks the task up and runs it in Cline's sidebar,
+  visibly, with your existing Cline provider/model settings.
+- Status, heartbeats, failures, and finished summaries flow back through the
+  repo so Muse can report like a human would.
 
-Open the bridge repo folder in VS Code and you're done — Backseat
-auto-detects it. Or set these in VS Code settings (search "Backseat"):
+The unglamorous parts are the point: provider-error auto-retries, session
+re-adoption after VS Code restarts, remote cancel from your phone, and a
+setup doctor that tells you exactly which link in the chain is broken.
 
-| Setting | What it does |
-|---|---|
-| `backseat.repoPath` | Local clone of the bridge repo. Empty = auto-detect from the open folder. |
-| `backseat.pollIntervalSec` | How often to pull and look for tasks (default 30). |
-| `backseat.autoStart` | Start polling on VS Code launch (default true). |
-| `backseat.clineCommand` | Cline CLI command for the fallback path (default `cline`; full path if needed). |
-| `backseat.preferClineApi` | Try Cline's extension API first (default true). |
-| `backseat.defaultTimeoutSec` | Kill a task after this long (default 1800). |
+## Setup
 
-Commands (Ctrl+Shift+P): **Backseat: Start polling / Stop polling /
-Check for tasks now / Show status**. A status-bar item and an Explorer view
-("Backseat Tasks") show pending/active/done tasks; output goes to the
-"Backseat" channel.
+1. Create your private copy of the bridge template:
+   <https://github.com/darek225/backseat> → **Use this template** → private repo.
+2. Paste your new repo link into Muse and say: **"set up Backseat with this repo."**
+   Muse reads `MUSE.md`, clones your copy, and starts watching for work.
+3. Install this extension, install/sign in to Cline, and open the **Backseat**
+   tab in the VS Code activity bar.
+4. Put your private repo (`owner/repo`) and an unguessable ping topic in the
+   setup card, hit **Save & connect**, then run **Backseat: Run setup doctor**.
 
-## Remote project control
+No settings JSON spelunking. No terminal window babysitting.
 
-Tasks with `"kind": "command"` drive VS Code itself instead of Cline, so the
-user can manage projects entirely from their phone (see `protocol.md`):
+## Commands
 
-| Command | What it does |
-|---|---|
-| `openProject` | Adds `args.project` (nickname) or `args.path` as a workspace root — the bridge repo stays open, so remote control never drops |
-| `newProject` | Creates `args.path` (`git init` + stub README) and adds it as a workspace root |
-| `closeWindow` | Publishes the done state, then closes VS Code |
-| `deleteProject` | Permanently deletes the project — requires `"confirm": "delete"`, and refuses home dir / repo / filesystem roots |
-
-Project nicknames resolve through the bridge repo's `projects.json`; the
-extension learns the nickname → path mapping automatically after a successful
-open/create and forgets it on delete.
-
-## Setup doctor
-
-`Backseat: Run setup doctor` (command palette) checks every link in the
-chain — repo detection, task directories, git push/pull auth, the `cline`
-CLI, the Cline extension and its API probe — and prints a pasteable report
-to the Backseat output channel. Run it when something isn't working.
-
-## Instant notifications (ntfy)
-
-Git polling is reliable but slow. For near-instant completion pings, set
-`backseat.notifyTopic` to any unguessable string (e.g. `backseat-9f3k7q2x`).
-The extension then POSTs a "task finished" message to
-`https://ntfy.sh/<topic>` on every completion (free, no account needed) and
-publishes the topic to `notify.json` in the bridge repo, so any Muse can
-discover it automatically. The ping carries only the task id, title, and
-result — never secrets. Leave the setting empty to disable; git polling
-still works on its own.
-
-Every Cline run gets a summary trailer appended to its prompt ("end your
-reply with a brief summary: what you changed and how to verify it"), so done
-files carry what the morning digest needs.
+- `Backseat: Start polling`
+- `Backseat: Stop polling`
+- `Backseat: Check for tasks now`
+- `Backseat: Show status`
+- `Backseat: Run setup doctor`
 
 ## How it drives Cline
 
-1. **Extension API (preferred):** activates `saoudrizwan.claude-dev` and
-   calls its programmatic API. Cline's API surface is not officially
-   documented, so the code probes it defensively (`startNewTask` +
-   `getTaskHistory` for completion detection). If the shape isn't what we
-   expect, it logs what it found and falls back — it never half-drives Cline.
-2. **CLI fallback (tested):** spawns `cline --yolo "<prompt>"` in the task's
-   `project_dir`, streams output, pushes heartbeats every ~30s, and reports
-   the exit code. This is the documented headless path
-   ([Cline CLI README](https://github.com/cline/cline/blob/main/apps/cli/README.md)).
+Preferred path: Backseat activates the Cline extension
+(`saoudrizwan.claude-dev`) and starts the task in Cline's sidebar via
+`startNewTask`, so you can watch the work happen at chat speed.
 
-Once `startNewTask()` has been called on the API path, the extension stays
-on that path for the task (falling back to the CLI as well would run the
-prompt twice).
+Fallback path: if the extension API shape is not available, Backseat uses the
+documented headless Cline CLI (`cline --yolo`) in the task's project
+directory. Once a task starts on one path, Backseat stays on that path — it
+never runs the same prompt twice.
 
-## Failure handling
+## Security model
 
-Cline prompts fail for flaky reasons — rate limits, network blips,
-overloaded models. The extension classifies each failure:
+- **Auto-approve is the point — and the risk.** Only queue work you would let
+  run unsupervised, pointed at project directories you trust.
+- **No secrets in the repo.** Tasks carry prompts and paths only. Your model
+  keys stay in Cline's own config on your PC.
+- **No open ports.** The extension only makes outbound git calls to GitHub.
+- **Private repo = pairing.** Only your Muse knows the repo, only your PC
+  has it cloned with your credentials, and only your VS Code runs Backseat
+  against it.
 
-- **Transient** (rate limit / network): retried with backoff (2 min, 10 min),
-  up to `max_retries` per task (default 2).
-- **Timeout on the CLI path**: retried like transient (the process was
-  killed, so it's safe). Never auto-retried on the API path — the task may
-  still be running in Cline's sidebar, and retrying would run it twice.
-- **Out of credits / context overflow**: failed immediately, never blindly
-  retried. Out-of-credits needs a human top-up; context overflow means Muse
-  must split the task into smaller pieces.
+## Limitations
 
-A failed task never blocks the queue — the extension moves on to the next
-pending task, and the failure details (`error_kind`, `attempts`, `error`)
-land in the done file for Muse to triage.
+- Your PC must be on and awake with VS Code open. Asleep means queued tasks wait.
+- One task at a time per PC.
+- Do not add collaborators you do not fully trust: anyone with write access
+  to the bridge repo can queue tasks that run code on your PC.
 
-## Security notes
+## Support
 
-- **Auto-approve is the point — and the risk.** Both paths run Cline with
-  automatic tool approval so tasks complete unsupervised. Only queue tasks
-  you trust, pointed at project directories.
-- **No secrets in the repo.** Tasks carry prompts and paths only. Your
-  DeepSeek key stays in Cline's own VS Code storage / CLI config on the PC.
-- **No open ports.** The extension only shells out to `git` (outbound HTTPS
-  to GitHub).
-- One task at a time; the git push of the claim is the lock if two
-  VS Code windows ever race.
+Issues and source: <https://github.com/darek225/backseat>
+
+MIT licensed.
