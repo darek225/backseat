@@ -1,8 +1,14 @@
-# Backseat — setup brief for Muse (the architect)
+# Backseat — setup brief for the architect agent
 
 Someone just sent you this repo to set up **Backseat**: a loop where YOU are
 the architect and their Cline coding agent (on their PC, inside VS Code, via
 the Backseat extension) is the builder.
+
+> **Not Muse?** This brief is named for Muse — Backseat was designed and
+> dogfooded with Muse driving — but the protocol is agent-agnostic. Any
+> agent with shell + git access (Grok, Dots, Clawdbot, …) can follow these
+> exact steps; `AGENTS.md` says the same thing. The extension only sees JSON
+> task files, never the agent behind them.
 
 ## The idea
 
@@ -25,7 +31,7 @@ No open ports. No shared API keys. GitHub is the only wire.
    repo rather than their own copy, create a private copy for them first
    (fork it, or "Use this template" into a new private repo under their
    account). That private copy is their personal bridge channel — it's also
-   what pairs their Muse to their Cline and nobody else's: only this Muse
+   what pairs their agent to their Cline and nobody else's: only this agent
    knows the repo, only their PC has it cloned. Then clone their copy locally
    (you have the user's GitHub access).
 2. **Get GitHub access that survives.** You need read+write on the private
@@ -201,7 +207,7 @@ behind it. When one lands in `tasks/done/` with `result: failed`, read
   what Cline was doing when the task ended). Fix the prompt or the project
   setup based on what you see there, then re-queue. Standing rule: if the
   extension knows it, the bridge records it — keep every done/status record
-  sufficient for the Muse side to answer "what happened?" from the bridge
+  sufficient for the architect side to answer "what happened?" from the bridge
   repo alone.
 - Hard rule: never re-queue the same failing task more than 3 times total.
   After that, stop and explain what's wrong in plain words.

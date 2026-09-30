@@ -4,14 +4,24 @@
 
 **Backseat-drive your Cline coding agent from your phone.**
 
-Chat with Muse anywhere — your PC does the coding. You architect from the
-couch; Cline builds in VS Code. No servers, no open ports, no shared API
-keys. GitHub is the only wire.
+Chat with your AI agent anywhere — your PC does the coding. You architect
+from the couch; Cline builds in VS Code. No servers, no open ports, no
+shared API keys. GitHub is the only wire.
 
 ```
-you (phone) ──chat──▶ Muse (architect) ──git──▶ Backseat extension ──▶ Cline (builder)
-   "add a login page"      queues tasks          runs them on your PC     in VS Code
+you (phone) ──chat──▶ your agent (architect) ──git──▶ Backseat extension ──▶ Cline (builder)
+   "add a login page"      queues tasks             runs them on your PC       in VS Code
 ```
+
+## Bring your own agent
+
+Backseat is a protocol, not a Claude product. It was designed and dogfooded
+with Muse in the architect seat, but nothing on the wire is
+Claude-specific: the queue is JSON files in a private GitHub repo (see
+`protocol.md`), so **any agentic AI that can clone a repo, write JSON, and
+push commits can drive** — Muse, Grok, Dots, Clawdbot, your own agent.
+Hand it `MUSE.md` (or `AGENTS.md`) and it configures itself. The extension
+on your PC can't tell who's at the wheel, and doesn't care.
 
 ## Instant setup
 
@@ -20,15 +30,15 @@ Click **Use this template** at the top of this page and create a **private**
 repository. That's your personal bridge — your tasks and project paths stay
 visible only to you.
 
-**2. Give your Muse access to the repo.**
-Your Muse needs to read and write that private repo. Paste the repo link
-into Muse and say *"set up Backseat with this repo"* — it reads `MUSE.md`,
-installs the GitHub CLI if needed, and walks you through a 30-second
-sign-in: it shows you a short code, you type it into **github.com/device**
-on your phone, done. No tokens to create, no permissions to pick.
-Its side is fully automatic from there.
+**2. Give your agent access to the repo.**
+Your agent needs to read and write that private repo. Paste the repo link
+into your agent (Muse, Grok, …) and say *"set up Backseat with this
+repo"* — it reads `MUSE.md`, installs the GitHub CLI if needed, and walks
+you through a 30-second sign-in: it shows you a short code, you type it
+into **github.com/device** on your phone, done. No tokens to create, no
+permissions to pick. Its side is fully automatic from there.
 
-Then tell your Muse two things:
+Then tell your agent two things:
 - *"Check the bridge repo every 10 minutes and tell me when tasks finish."*
 - *"Every morning at 7, summarize last night's work into a digest."*
 
@@ -45,46 +55,46 @@ icon):
   `~/.backseat/bridge` and manages it itself — it works in *every* VS Code
   window, whatever project you have open. The ping topic is
   machine-to-machine signaling only (no app, no account, nothing to
-  install): your Muse's ping wakes the PC in ~1 second when you queue a
+  install): your agent's ping wakes the PC in ~1 second when you queue a
   task, and the PC pings back the moment a task finishes.
 - If the clone needs your GitHub sign-in, you'll get a one-click
   **Run clone in terminal** button — sign in there, done.
 - Hit **Run setup doctor**: every check should read PASS. If something's
   red, the message tells you exactly what's missing.
 
-Now chat with Muse: `status` to see what's happening, `queue: <description>`
+Now chat with your agent: `status` to see what's happening, `queue: <description>`
 to send Cline work. You can also manage projects by texting:
 `open my blog`, `create a new project called X`, `close vscode`.
-Hand Muse a big plan in the evening and it will break it into tasks,
+Hand your agent a big plan in the evening and it will break it into tasks,
 work the queue overnight, and leave a digest in the morning.
 
-## How your Muse finds your Cline (and nobody else's)
+## How your agent finds your Cline (and nobody else's)
 
 There's no account system and no central server. The pairing **is** your
 private repo copy:
 
-- Only **your** Muse knows your repo — you gave it the link.
+- Only **your** agent knows your repo — you gave it the link.
 - Only **your** PC has that repo cloned with your Git credentials.
 - Only **your** VS Code runs the Backseat extension against that clone.
 
-Nobody else's Muse can see your repo, so nobody else's tasks can reach your
+Nobody else's agent can see your repo, so nobody else's tasks can reach your
 PC. One private copy per person keeps every bridge separate by construction.
 
 ## How it works
 
-- **Muse** breaks your requests into tasks: `tasks/pending/<id>.json`
+- **Your agent** breaks your requests into tasks: `tasks/pending/<id>.json`
   (prompt, project dir, timeout — see `protocol.md`).
 - **The Backseat extension** polls the repo, claims the oldest task
   (the git push is the lock), and hands the prompt to Cline — via Cline's
   extension API when available, falling back to the headless `cline --yolo`
   CLI. Live progress lands in `tasks/status/<id>.json`.
-- **Finished tasks** move to `tasks/done/` with the result; Muse reports
-  back in chat like a human would.
+- **Finished tasks** move to `tasks/done/` with the result; your agent
+  reports back in chat like a human would.
 
 One task at a time. Heartbeats every ~30s while running. With
 `backseat.notifyTopic` set, task pickup is ~instant (ntfy wake-up ping) and
 completions ping back immediately; without it, the extension polls every
-`pollIntervalSec` (default 30s). Muse's checks are polling (every few
+`pollIntervalSec` (default 30s). The agent's checks are polling (every few
 minutes), so asking `status` in chat is the fast path.
 
 ## Security
@@ -99,7 +109,7 @@ minutes), so asking `status` in chat is the fast path.
 
 - **Your PC must stay on and awake**, with VS Code open on the bridge repo
   folder. Asleep means silent — queued tasks just wait.
-- **Muse's side is polling, not instant.** It checks every few minutes; ask
+- **The agent side is polling, not instant.** It checks every few minutes; ask
   `status` in chat for the fast path.
 - **The Cline extension API is unverified** — Backseat probes it and falls
   back to the documented headless `cline --yolo` CLI, which is the tested path.
@@ -109,7 +119,8 @@ minutes), so asking `status` in chat is the fast path.
 
 ## Files
 
-- `MUSE.md` — setup brief: send the repo to any Muse and it configures itself
+- `MUSE.md` — setup brief: send the repo to your agent and it configures itself
+- `AGENTS.md` — the same brief for non-Muse agents (points at `MUSE.md` + `protocol.md`)
 - `protocol.md` — exact JSON schemas for tasks and status files
 - `CHANGELOG.md` — what's new in each release
 - `vscode-bridge/` — the VS Code extension source (TypeScript)

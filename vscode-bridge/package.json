@@ -102,11 +102,12 @@
       ]
     }
   },
-  "description": "Backseat-drive your Cline coding agent from your phone. Polls the bridge repo for architect tasks from Muse and runs them through Cline.",
+  "description": "Backseat-drive your Cline coding agent from your phone. Polls the bridge repo for tasks from your AI agent (Muse, Grok, or any agent that can use git) and runs them through Cline.",
   "keywords": [
     "cline",
     "claude",
-    "ai",
+    "grok",
+    "ai-agent",
     "coding-agent",
     "agent",
     "remote",
@@ -145,6 +146,6 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.12",
+  "version": "0.9.13",
   "icon": "images/icon.png"
 }

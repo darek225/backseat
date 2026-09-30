@@ -4,26 +4,32 @@
 
 ![Backseat demo](images/demo.gif)
 
-Chat with Muse anywhere — your PC does the coding. You architect from the
-couch; Cline builds in VS Code. No servers, no open ports, no shared API
-keys. GitHub is the only wire.
+Chat with your AI agent anywhere — your PC does the coding. You architect
+from the couch; Cline builds in VS Code. No servers, no open ports, no
+shared API keys. GitHub is the only wire.
 
 ```text
-you (phone) ──chat──▶ Muse (architect) ──git──▶ Backseat extension ──▶ Cline (builder)
-   "add a login page"      queues tasks          runs them on your PC     in VS Code
+you (phone) ──chat──▶ your agent (architect) ──git──▶ Backseat extension ──▶ Cline (builder)
+   "add a login page"      queues tasks             runs them on your PC       in VS Code
 ```
 
 ## What it does
 
-Backseat turns a private GitHub repo into a task queue between you, Muse,
-and Cline:
+Backseat turns a private GitHub repo into a task queue between you, your AI
+agent, and Cline:
 
 - You describe work in plain language from your phone.
-- Muse writes it up as a task in your private bridge repo.
+- Your agent writes it up as a task in your private bridge repo.
 - This VS Code extension picks the task up and runs it in Cline's sidebar,
   visibly, with your existing Cline provider/model settings.
 - Status, heartbeats, failures, and finished summaries flow back through the
-  repo so Muse can report like a human would.
+  repo so your agent can report like a human would.
+
+**Bring your own agent.** Backseat is an open protocol (git + JSON), not a
+Claude product. It was designed and dogfooded with Muse driving, but any
+agentic AI that can clone a repo and push commits — Muse, Grok, Dots,
+Clawdbot, your own — can take the architect seat. This extension can't tell
+who's at the wheel, and doesn't care.
 
 The unglamorous parts are the point: provider-error auto-retries, session
 re-adoption after VS Code restarts, remote cancel from your phone, and a
@@ -33,8 +39,9 @@ setup doctor that tells you exactly which link in the chain is broken.
 
 1. Create your private copy of the bridge template:
    <https://github.com/darek225/backseat> → **Use this template** → private repo.
-2. Paste your new repo link into Muse and say: **"set up Backseat with this repo."**
-   Muse reads `MUSE.md`, clones your copy, and starts watching for work.
+2. Paste your new repo link into your agent (Muse, Grok, …) and say:
+   **"set up Backseat with this repo."** Your agent reads `MUSE.md` (or
+   `AGENTS.md`), clones your copy, and starts watching for work.
 3. Install this extension, install/sign in to Cline, and open the **Backseat**
    tab in the VS Code activity bar.
 4. Put your private repo (`owner/repo`) and an unguessable ping topic in the
@@ -68,7 +75,7 @@ never runs the same prompt twice.
 - **No secrets in the repo.** Tasks carry prompts and paths only. Your model
   keys stay in Cline's own config on your PC.
 - **No open ports.** The extension only makes outbound git calls to GitHub.
-- **Private repo = pairing.** Only your Muse knows the repo, only your PC
+- **Private repo = pairing.** Only your agent knows the repo, only your PC
   has it cloned with your credentials, and only your VS Code runs Backseat
   against it.
 
