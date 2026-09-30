@@ -5,4 +5,7 @@ src/**
 **/*.ts
 node_modules/**
 images/logo.png
+images/logo.svg
+images/logo-glyph.png
+images/logo-glyph.svg
 test/**
