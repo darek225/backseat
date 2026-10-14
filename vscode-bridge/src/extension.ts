@@ -47,6 +47,18 @@ import {
   isRemoteCancelled,
   findSessionIdByMarker,
   isClaimedByDeadRunner,
+  activityDeadline,
+  linkedCommits,
+  LinkedCommit,
+  checkpointBranchName,
+  transcriptProgress,
+  buildProgressNote,
+  applyLateResult,
+  wantsLateWatch,
+  parseTranscriptChunks,
+  transcriptTail as transcriptTailOf,
+  transcriptStats,
+  LateOutcome,
 } from './logic';
 import {
   DashboardBackend,
@@ -90,6 +102,7 @@ interface BridgeTask {
   // written by this extension on completion (tasks/done/)
   result?: string;
   exit_code?: number;
+  created_at?: string; // architect's queue timestamp (read for commit-link windows)
   started_at?: string;
   finished_at?: string;
   error?: string | null;
@@ -98,6 +111,28 @@ interface BridgeTask {
   // Additive and optional — absent on CLI-path and command tasks.
   transcript_tail?: string;
   transcript_stats?: { messages: number; errorsSeen: number };
+  // 0.9.14 — timeout is a state, not a verdict (BACKSEAT_BUGS_2026-10-12):
+  // claimed_at records when this runner claimed the task (vs started_at,
+  // when Cline actually began). Sidebar-path timeouts keep watching for
+  // a late completion until late_watch_until; linked_commits names
+  // project-repo commits landed during the task window; checkpoint
+  // records the non-disruptive worktree snapshot pushed on timeout.
+  claimed_at?: string;
+  timeout_pending_late?: boolean;
+  late_watch_until?: string;
+  late_session_id?: string;
+  late_messages_path?: string;
+  late_sentinel_path?: string;
+  completed_late?: boolean;
+  original_result?: string;
+  timed_out_at?: string;
+  late_finished_at?: string;
+  linked_commits?: LinkedCommit[];
+  checkpoint?: { branch: string; sha: string; reason: string; at: string } | null;
+  worktree_base?: string; // project-repo HEAD sha when the task started
+  // transient detail carried from a sidebar-path timeout into finishTask
+  timeout_reason?: 'inactivity' | 'total';
+  last_activity_at?: string;
 }
 
 /**
@@ -111,6 +146,12 @@ interface SidebarOutcome {
   output: string;
   exitCode: number;
   messagesPath?: string;
+  /** Present on sidebar-path timeouts (0.9.14): why the deadline fired. */
+  timedOutReason?: 'inactivity' | 'total';
+  lastActivityAt?: string;
+  linkedCommits?: LinkedCommit[];
+  /** Present on sidebar-path timeouts: keep watching this session for a late finish. */
+  sessionId?: string | null;
 }
 
 interface BridgeConfig {
@@ -124,6 +165,15 @@ interface BridgeConfig {
   defaultTimeoutSec: number;
   heartbeatSec: number;
   notifyTopic: string; // ntfy.sh topic for instant task-finished pings ("" = off)
+  // 0.9.14 reliability settings (BACKSEAT_BUGS_2026-10-12):
+  /** Timeout when Cline shows no activity this long (transcript/output/commits); 0 disables. */
+  inactivityTimeoutSec: number;
+  /** After a sidebar-path timeout, keep watching the Cline session for late completion this long; 0 disables. */
+  lateWatchSec: number;
+  /** While a task runs, checkpoint uncommitted project work to a backseat/<task-id> branch every N minutes; 0 disables. */
+  checkpointMin: number;
+  /** Always checkpoint the worktree on timeout (even when checkpointMin is 0). */
+  checkpointOnTimeout: boolean;
 }
 
 /** Where the extension keeps its self-managed bridge clone. */
@@ -260,6 +310,10 @@ class BridgeRunner {
       preferClineApi: Boolean(c.get('preferClineApi') ?? true),
       defaultTimeoutSec: Number(c.get('defaultTimeoutSec') ?? 1800),
       heartbeatSec: Number(c.get('heartbeatSec') ?? 30),
+      inactivityTimeoutSec: Number(c.get('inactivityTimeoutSec') ?? 1800),
+      lateWatchSec: Number(c.get('lateWatchSec') ?? 7200),
+      checkpointMin: Number(c.get('checkpointMin') ?? 15),
+      checkpointOnTimeout: Boolean(c.get('checkpointOnTimeout') ?? true),
       notifyTopic: String(c.get('notifyTopic') ?? '').trim(),
     };
   }
@@ -596,6 +650,11 @@ class BridgeRunner {
     }
     this.tree?.refresh();
 
+    // Late completion watch (0.9.14, BUG 1): revise timeout records when
+    // the sidebar session finishes after the verdict. doPoll returns early
+    // while a task runs, so this only fires when idle.
+    await this.checkLateWatches(cfg);
+
     const pendingDir = path.join(cfg.repoPath, 'tasks', 'pending');
     let files: string[] = [];
     try {
@@ -650,6 +709,10 @@ class BridgeRunner {
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       fs.renameSync(src, dst); // local claim
       task.claimed_by = this.runnerId;
+      // claimed_at vs started_at (0.9.14, BUG 3): the claim lands the
+      // instant we take the task; started_at is stamped later when Cline
+      // actually begins work. Keep both so stalls can be told apart.
+      task.claimed_at = utcnow();
       writeJsonAtomic(dst, task); // the stamp travels with the pushed claim
     } catch (e: any) {
       this.out.appendLine(`[backseat] could not claim ${task.id}: ${e?.message}`);
@@ -794,8 +857,14 @@ class BridgeRunner {
     }
 
     task.started_at = utcnow();
-    await this.writeStatus(cfg, task.id, 'queued', '', 'starting');
+    await this.writeStatus(cfg, task.id, 'queued', '', 'starting', {
+      claimed_at: task.claimed_at,
+      started_at: task.started_at,
+    });
     await pushChanges(cfg.repoPath, `task ${task.id}: queued`, this.out);
+    // Record the project worktree's HEAD so checkpoints and linked
+    // commits can be attributed to this task's window.
+    task.worktree_base = await this.gitHeadSha(this.projectDirForTask(cfg, task));
 
     // Ask Cline to end with a short summary — it lands in the done file and
     // powers the morning digest. (Not stored in the task JSON.)
@@ -818,6 +887,7 @@ class BridgeRunner {
     // would fail identically; Muse triages those instead.
     const maxRetries = task.max_retries ?? 2;
     let attempt = 0;
+    let lastVia: 'api' | 'cli' = 'cli';
     for (;;) {
       attempt++;
       task.attempts = attempt;
@@ -832,6 +902,17 @@ class BridgeRunner {
         if (viaApi) {
           via = 'api';
           ({ result, output, exitCode, messagesPath } = viaApi);
+          // Carry the sidebar-timeout detail forward so finishTask can
+          // write a timeout record worth reading (BUG 1) and the poll
+          // loop can keep watching for a late completion.
+          task.timeout_reason = viaApi.timedOutReason;
+          task.last_activity_at = viaApi.lastActivityAt;
+          if (viaApi.sessionId) {
+            task.late_session_id = viaApi.sessionId;
+          }
+          if (viaApi.messagesPath) {
+            task.late_messages_path = viaApi.messagesPath;
+          }
           errorKind = result === 'success' ? 'failed' : classifyError(output);
           if (result === 'timeout') {
             // The API task may still be working in the sidebar — never
@@ -847,6 +928,7 @@ class BridgeRunner {
         ({ result, output, exitCode } = await this.runViaCli(cfg, task, prompt));
         errorKind = this.classifyCliResult(result, output);
       }
+      lastVia = via;
 
       const decision = shouldRetryTask(result, errorKind, via, attempt, maxRetries);
       if (!decision.retry) {
@@ -873,6 +955,29 @@ class BridgeRunner {
     }
     task.error_kind = result === 'success' ? undefined : errorKind;
 
+    // Link project-repo commits landed during the task window (BUG 1c):
+    // staged pushes show up here even when the bridge record says timeout.
+    task.linked_commits = await this.linkedCommitsFor(cfg, task);
+
+    const projectDir = this.projectDirForTask(cfg, task);
+    if (result === 'timeout' && cfg.checkpointOnTimeout) {
+      // Addendum to BACKSEAT_BUGS_2026-10-12: uncommitted work must never
+      // be stranded by a timeout — snapshot it to backseat/<task-id>.
+      const cp = await this.checkpointWorktree(projectDir, task.id, 'timeout');
+      if (cp) task.checkpoint = cp;
+    }
+
+    if (result === 'timeout' && lastVia === 'api' && cfg.lateWatchSec > 0 && task.late_session_id) {
+      // Timeout is a STATE, not a verdict (BUG 1): the sidebar session may
+      // still be working. The poll loop keeps watching and revises this
+      // record when Cline finishes (see checkLateWatches).
+      task.timeout_pending_late = true;
+      task.late_watch_until = new Date(Date.now() + cfg.lateWatchSec * 1000).toISOString();
+      this.out.appendLine(
+        `[backseat] ${task.id}: timed out (${task.timeout_reason ?? 'total'}) — watching for late completion until ${task.late_watch_until}`,
+      );
+    }
+
     this.out.appendLine(
       `[backseat] task ${task.id} finished: ${result} (exit ${exitCode}, ${Math.round((Date.now() - startedAt) / 1000)}s)`,
     );
@@ -894,9 +999,15 @@ class BridgeRunner {
     }
 
     task.started_at = utcnow();
-    await this.writeStatus(cfg, task.id, 'queued', '', 'starting');
+    await this.writeStatus(cfg, task.id, 'queued', '', 'starting', {
+      claimed_at: task.claimed_at,
+      started_at: task.started_at,
+    });
     await pushChanges(cfg.repoPath, `task ${task.id}: queued`, this.out);
-    await this.writeStatus(cfg, task.id, 'running', '', String(task.command));
+    await this.writeStatus(cfg, task.id, 'running', '', String(task.command), {
+      claimed_at: task.claimed_at,
+      started_at: task.started_at,
+    });
     await pushChanges(cfg.repoPath, `task ${task.id}: running`, this.out);
 
     let result: TaskState = 'failed';
@@ -944,6 +1055,34 @@ class BridgeRunner {
           /* non-fatal */
         }
         fs.writeFileSync(path.join(targetPath, 'README.md'), `# ${name}\n`);
+        // A default .gitignore so the 0.9.14 worktree checkpoint (which
+        // snapshots untracked-but-not-ignored files) never pushes build
+        // artifacts, dependencies, or editor state to backseat/<task-id>.
+        if (!fs.existsSync(path.join(targetPath, '.gitignore'))) {
+          fs.writeFileSync(
+            path.join(targetPath, '.gitignore'),
+            [
+              '# generated by Backseat newProject',
+              'node_modules/',
+              'dist/',
+              'build/',
+              'out/',
+              '*.o',
+              '*.obj',
+              'Binaries/',
+              'Intermediate/',
+              'DerivedDataCache/',
+              'Saved/',
+              '.vs/',
+              '.vscode/settings.json',
+              '.idea/',
+              '*.log',
+              '.env',
+              '.env.local',
+              '',
+            ].join('\n'),
+          );
+        }
         await this.switchProjectRoot(targetPath, name);
         await this.learnProject(cfg, name, targetPath);
         return `created and opened project: ${targetPath}`;
@@ -1265,7 +1404,10 @@ class BridgeRunner {
       `Do not write this file until you are completely finished. Do not stop early.`;
 
     this.out.appendLine(`[backseat] starting Cline sidebar task: ${task.id}`);
-    await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) working');
+    await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) working', {
+      claimed_at: task.claimed_at,
+      started_at: task.started_at,
+    });
     await pushChanges(cfg.repoPath, `task ${task.id}: running`, this.out);
 
     try {
@@ -1345,7 +1487,10 @@ class BridgeRunner {
       }
     }
     this.out.appendLine(`[backseat] resuming Cline session ${sessionId} for ${task.id} (context kept)`);
-    await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) resumed');
+    await this.writeStatus(cfg, task.id, 'running', '', 'cline (sidebar) resumed', {
+      claimed_at: task.claimed_at,
+      started_at: task.started_at,
+    });
     await pushChanges(cfg.repoPath, `task ${task.id}: resumed`, this.out);
     return this.watchSidebarTask(cfg, task, api, { sessionId, messagesPath, sentinelPath });
   }
@@ -1469,6 +1614,14 @@ class BridgeRunner {
     const timeoutMs = (task.timeout_sec ?? cfg.defaultTimeoutSec) * 1000;
     const started = Date.now();
     let lastHeartbeat = 0;
+    // 0.9.14 (BUG 2): the deadline is activity-based. Any sign of life —
+    // transcript growth, an auto-retry press, or a stage commit pushed to
+    // the project repo — resets the quiet clock. Only a quiet task, or
+    // the absolute timeout_sec cap, fires the timeout.
+    let lastActivityMs = Date.now();
+    let lastCommitCheck = 0;
+    let lastCheckpointMs = Date.now();
+    let lastLinked: LinkedCommit[] = [];
     // Liveness comes from the live transcript: new messages mean Cline is
     // progressing. When the transcript goes quiet:
     // - if the tail shows a provider error and Cline is NOT awaiting user
@@ -1522,7 +1675,49 @@ class BridgeRunner {
       }
       if (Date.now() - lastHeartbeat > cfg.heartbeatSec * 1000) {
         lastHeartbeat = Date.now();
-        await this.writeStatus(cfg, task.id, 'running', '', stickyNote ?? 'cline (sidebar) working');
+        // Commit linking (throttled): staged pushes by Cline count as
+        // activity AND show up in the task record as evidence (BUG 1c).
+        if (Date.now() - lastCommitCheck > 5 * 60 * 1000) {
+          lastCommitCheck = Date.now();
+          const commits = await this.linkedCommitsFor(cfg, task);
+          if (commits.length > lastLinked.length) {
+            lastActivityMs = Date.now();
+          }
+          lastLinked = commits;
+        }
+        // Periodic checkpoint (addendum): snapshot uncommitted work to
+        // backseat/<task-id> so a later timeout can never strand it.
+        if (cfg.checkpointMin > 0 && Date.now() - lastCheckpointMs > cfg.checkpointMin * 60_000) {
+          lastCheckpointMs = Date.now();
+          const cp = await this.checkpointWorktree(this.projectDirForTask(cfg, task), task.id, 'periodic');
+          if (cp) task.checkpoint = cp;
+        }
+        const chunks = messagesPath ? parseTranscriptChunks(messagesPath) : [];
+        const prog = transcriptProgress(chunks);
+        const stats = messagesPath ? transcriptStats(messagesPath) : { messages: 0, errorsSeen: 0 };
+        const note = buildProgressNote({
+          messages: stats.messages,
+          errorsSeen: stats.errorsSeen,
+          lastText: prog.lastText,
+          lastTool: prog.lastTool,
+          commitCount: lastLinked.length,
+          minutesActive: (Date.now() - started) / 60000,
+        });
+        const dl = activityDeadline({
+          startedAtMs: started,
+          lastActivityMs,
+          totalTimeoutMs: timeoutMs,
+          inactivityTimeoutMs: cfg.inactivityTimeoutSec * 1000,
+          nowMs: Date.now(),
+        });
+        await this.writeStatus(cfg, task.id, 'running', '', stickyNote ?? note, {
+          started_at: task.started_at,
+          claimed_at: task.claimed_at,
+          last_activity_at: new Date(lastActivityMs).toISOString(),
+          deadline_at: dl.deadlineMs === Infinity ? undefined : new Date(dl.deadlineMs).toISOString(),
+          linked_commits: lastLinked,
+          checkpoint: task.checkpoint ?? undefined,
+        });
         await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
       }
 
@@ -1557,6 +1752,7 @@ class BridgeRunner {
           if (mtime > lastMsgMtime) {
             lastMsgMtime = mtime;
             lastMsgCount++;
+            lastActivityMs = Date.now(); // transcript growth = Cline is working
             retryAttempted = false;
             errorRetryAttempted = false;
             errorRetryBlocked = false;
@@ -1621,6 +1817,7 @@ class BridgeRunner {
           );
           try {
             await api.pressPrimaryButton?.();
+            lastActivityMs = Date.now(); // our intervention may unstick it
           } catch (e: any) {
             this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
           }
@@ -1650,19 +1847,41 @@ class BridgeRunner {
           await setNote('cline (sidebar) quiet — tried retry');
           try {
             await api.pressPrimaryButton?.();
+            lastActivityMs = Date.now();
           } catch (e: any) {
             this.out.appendLine(`[backseat] pressPrimaryButton failed: ${e?.message ?? e}`);
           }
         }
       }
-      if (Date.now() - started >= timeoutMs) {
+      // 3. Activity-based deadline (0.9.14, BUG 2): a fixed wall clock
+      // can't tell "80% done" from "dead at minute 2". Only a quiet task
+      // (no transcript, no commits, no auto-retry activity) or the
+      // absolute timeout_sec cap fires.
+      const dl = activityDeadline({
+        startedAtMs: started,
+        lastActivityMs,
+        totalTimeoutMs: timeoutMs,
+        inactivityTimeoutMs: cfg.inactivityTimeoutSec * 1000,
+        nowMs: Date.now(),
+      });
+      if (dl.timedOut) {
+        const reason = dl.reason ?? 'total';
+        const tail = messagesPath ? transcriptTailOf(messagesPath, 12, 1500) : '';
+        this.out.appendLine(
+          `[backseat] ${task.id}: ${reason === 'inactivity' ? 'no activity' : 'absolute timeout'} — declaring timeout (state, not verdict)`,
+        );
         return {
           result: 'timeout',
           output:
-            'Timed out waiting for the Cline sidebar task (no done-file, no terminal session status). ' +
-            'Cline may still be working — check the sidebar.',
+            `Timed out (${reason === 'inactivity' ? `no Cline activity for ${Math.round(cfg.inactivityTimeoutSec / 60)}m` : `hit the ${Math.round(timeoutMs / 60000)}m task timeout`}). ` +
+            'Cline may still be working — the bridge keeps watching for a late completion. ' +
+            (tail ? `Last transcript:\n${tail}` : 'No transcript available.'),
           exitCode: 124,
           messagesPath: messagesPath || undefined,
+          sessionId: sessionId ?? null,
+          timedOutReason: reason,
+          lastActivityAt: new Date(lastActivityMs).toISOString(),
+          linkedCommits: lastLinked,
         };
       }
     }
@@ -1724,18 +1943,29 @@ class BridgeRunner {
         return;
       }
 
+      const runStarted = Date.now();
+      // 0.9.14 (BUG 2): CLI output bytes are activity — a chatty Cline
+      // keeps its deadline; only a quiet process (or the absolute cap)
+      // gets killed.
+      let lastActivityMs = runStarted;
+      let lastOutputLen = 0;
+      let lastCheckpointMs = runStarted;
       const onData = (d: Buffer | string) => {
         const s = d.toString();
         output += s;
         if (output.length > 500_000) {
           output = output.slice(-250_000); // bound memory on very long runs
         }
+        if (output.length !== lastOutputLen) {
+          lastOutputLen = output.length;
+          lastActivityMs = Date.now();
+        }
       };
       child.stdout?.on('data', onData);
       child.stderr?.on('data', onData);
       child.on('error', (err) => {
         clearInterval(heartbeat);
-        clearTimeout(killer);
+        clearInterval(checker);
         done({
           result: 'failed',
           output: `cline not found (tried '${cfg.clineCommand}'). Set backseat.clineCommand to the full path.\n${err.message}`,
@@ -1744,7 +1974,7 @@ class BridgeRunner {
       });
       child.on('close', (code) => {
         clearInterval(heartbeat);
-        clearTimeout(killer);
+        clearInterval(checker);
         done({
           result: code === 0 ? 'success' : 'failed',
           output,
@@ -1754,23 +1984,152 @@ class BridgeRunner {
 
       const heartbeat = setInterval(() => {
         void (async () => {
-          await this.writeStatus(cfg, task.id, 'running', tailLines(output), 'cline working');
+          await this.writeStatus(cfg, task.id, 'running', tailLines(output), `cline working (${Math.round((Date.now() - runStarted) / 60000)}m)`, {
+            started_at: task.started_at,
+            claimed_at: task.claimed_at,
+            last_activity_at: new Date(lastActivityMs).toISOString(),
+          });
+          if (cfg.checkpointMin > 0 && Date.now() - lastCheckpointMs > cfg.checkpointMin * 60_000) {
+            lastCheckpointMs = Date.now();
+            const cp = await this.checkpointWorktree(projectDir, task.id, 'periodic');
+            if (cp) task.checkpoint = cp;
+          }
           await this.pushThrottled(cfg.repoPath, `task ${task.id}: heartbeat`);
         })();
       }, cfg.heartbeatSec * 1000);
 
-      const killer = setTimeout(() => {
+      const checker = setInterval(() => {
+        const dl = activityDeadline({
+          startedAtMs: runStarted,
+          lastActivityMs,
+          totalTimeoutMs: timeoutMs,
+          inactivityTimeoutMs: cfg.inactivityTimeoutSec * 1000,
+          nowMs: Date.now(),
+        });
+        if (!dl.timedOut) return;
         try {
           child.kill();
         } catch {
           /* already gone */
         }
         clearInterval(heartbeat);
-        output += `\n[TIMEOUT after ${Math.round(timeoutMs / 1000)}s]`;
+        clearInterval(checker);
+        output += `\n[TIMEOUT (${dl.reason}) after ${Math.round((Date.now() - runStarted) / 1000)}s]`;
         done({ result: 'timeout', output, exitCode: 124 });
-      }, timeoutMs);
-      killer.unref?.();
+      }, 5000);
     });
+  }
+
+  // -- Worktree checkpoints & commit linking (0.9.14) ---------------------
+
+  /**
+   * Resolve the directory Cline works in for this task (same resolution
+   * the CLI path uses).
+   */
+  private projectDirForTask(cfg: BridgeConfig, task: BridgeTask): string {
+    return (
+      task.project_dir ||
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
+      cfg.repoPath
+    );
+  }
+
+  private async gitHeadSha(dir: string): Promise<string> {
+    const r = await git(dir, ['rev-parse', 'HEAD']);
+    return r.code === 0 ? r.out.trim().split('\n')[0].trim() : '';
+  }
+
+  /**
+   * Project-repo commits landed since the task started, linked into the
+   * task record as evidence (BUG 1c: staged pushes by Cline show up here,
+   * and late commits after a timeout get picked up by the late watch).
+   * Returns [] when there is no git repo or no commits in the window.
+   */
+  private async linkedCommitsFor(cfg: BridgeConfig, task: BridgeTask): Promise<LinkedCommit[]> {
+    if (task.kind === 'command') return [];
+    const dir = this.projectDirForTask(cfg, task);
+    const since = task.started_at || task.created_at || '';
+    if (!since) return [];
+    const r = await git(dir, ['log', `--since=${since}`, '--format=%H %s', '--no-merges']);
+    if (r.code !== 0) return [];
+    const commits = r.out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^[0-9a-f]{40} /.test(l))
+      .map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) }));
+    return linkedCommits(commits, task.id);
+  }
+
+  /**
+   * Non-disruptive checkpoint of uncommitted project work (addendum to
+   * BACKSEAT_BUGS_2026-10-12: uncommitted work must never be stranded by
+   * a timeout).
+   *
+   * Pure plumbing, no working-tree or branch disturbance:
+   *   1. save the index's current tree (`git write-tree`)
+   *   2. `git add -A` (stages worktree incl. untracked-but-not-ignored
+   *      files — ignored build artifacts stay out by git's own rules)
+   *   3. `git write-tree` again → the snapshot tree
+   *   4. restore the exact original index (`git read-tree <saved>`)
+   *   5. `git commit-tree` parented on HEAD → point a
+   *      `backseat/<task-id>` branch at it → push.
+   * Cline can keep working undisturbed; the architect can recover or
+   * merge the checkpoint branch later. Returns null when there is
+   * nothing to save (clean tree).
+   *
+   * NOTE: `git stash create` was considered but silently ignores `-u`,
+   * so it can never capture untracked files (verified 2026-10-13).
+   */
+  private async checkpointWorktree(
+    projectDir: string,
+    taskId: string,
+    reason: string,
+  ): Promise<{ branch: string; sha: string; reason: string; at: string } | null> {
+    const isRepo = await git(projectDir, ['rev-parse', '--git-dir']);
+    if (isRepo.code !== 0) return null;
+    const head = await this.gitHeadSha(projectDir); // '' when no commits yet
+    const savedIndex = await git(projectDir, ['write-tree']);
+    if (savedIndex.code !== 0) return null;
+    const savedTree = savedIndex.out.trim().split('\n')[0].trim();
+    try {
+      const add = await git(projectDir, ['add', '-A']);
+      if (add.code !== 0) return null;
+      const wt = await git(projectDir, ['write-tree']);
+      if (wt.code !== 0) return null;
+      const snapTree = wt.out.trim().split('\n')[0].trim();
+      const baseTree = head ? (await git(projectDir, ['rev-parse', `${head}^{tree}`])).out.trim() : '';
+      if (head && snapTree === baseTree.trim().split('\n')[0]) {
+        return null; // clean tree — nothing to save
+      }
+      if (!head && snapTree === savedTree) {
+        return null; // no commits and nothing staged/untracked
+      }
+      const args = ['commit-tree', snapTree, '-m', `[backseat:task:${taskId}] checkpoint (${reason}) — auto-saved worktree`];
+      if (head) args.push('-p', head);
+      const ct = await git(projectDir, args);
+      const sha = ct.out.trim().split('\n')[0].trim();
+      if (ct.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) return null;
+      const branch = checkpointBranchName(taskId);
+      const br = await git(projectDir, ['update-ref', `refs/heads/${branch}`, sha]);
+      if (br.code !== 0) {
+        this.out.appendLine(`[backseat] checkpoint: could not create branch ${branch} (non-fatal)`);
+        return null;
+      }
+      // The extension owns the backseat/* namespace: each checkpoint
+      // supersedes the last, so force-push is correct here.
+      const push = await git(projectDir, ['push', 'origin', `+${branch}:${branch}`]);
+      if (push.code !== 0) {
+        this.out.appendLine(`[backseat] checkpoint: push failed for ${branch} (kept locally; non-fatal)`);
+      } else {
+        this.out.appendLine(
+          `[backseat] checkpointed uncommitted work to ${branch} (${sha.slice(0, 7)}) — reason: ${reason}`,
+        );
+      }
+      return { branch, sha, reason, at: utcnow() };
+    } finally {
+      // Restore the exact original index no matter what.
+      await git(projectDir, ['read-tree', savedTree]);
+    }
   }
 
   // -- Task finishing -------------------------------------------------------
@@ -1817,9 +2176,164 @@ class BridgeRunner {
       this.out.appendLine(`[backseat] could not move task file for ${task.id}: ${e?.message}`);
     }
 
-    await this.writeStatus(cfg, task.id, result, tailLines(output), `finished: ${result} (exit ${exitCode})`);
+    if (result === 'timeout' && task.timeout_pending_late) {
+      // BUG 1: a timeout record must carry what Cline actually did —
+      // transcript tail, stats, and last activity go into the STATUS
+      // record (not just the done record), because the status file is
+      // what the architect reads for "what's happening".
+      const tail = messagesPath ? transcriptTailOf(messagesPath, 12, 1500) : '';
+      const stats = messagesPath ? transcriptStats(messagesPath) : undefined;
+      const reason =
+        task.timeout_reason === 'inactivity' ? 'no Cline activity' : 'task timeout reached';
+      await this.writeStatus(
+        cfg,
+        task.id,
+        'timeout',
+        tail
+          ? `Timed out (${reason}). Cline may still be working — the bridge keeps watching for a late completion. Last transcript:\n${tail}`
+          : tailLines(output),
+        `timed out (${task.timeout_reason ?? 'total'}) — watching for late completion until ${task.late_watch_until ?? '?'}`,
+        {
+          transcript_tail: tail || undefined,
+          transcript_stats: stats,
+          last_activity_at: task.last_activity_at,
+          late_watch: true,
+          late_watch_until: task.late_watch_until,
+          linked_commits: task.linked_commits,
+          checkpoint: task.checkpoint ?? undefined,
+          started_at: task.started_at,
+          claimed_at: task.claimed_at,
+        },
+      );
+    } else {
+      await this.writeStatus(
+        cfg,
+        task.id,
+        result,
+        tailLines(output),
+        `finished: ${result} (exit ${exitCode})`,
+        {
+          linked_commits: task.linked_commits,
+          checkpoint: task.checkpoint ?? undefined,
+          started_at: task.started_at,
+          claimed_at: task.claimed_at,
+        },
+      );
+    }
     await pushChanges(cfg.repoPath, `task ${task.id}: ${result}`, this.out);
     await this.notifyNtfy(cfg, task, result);
+  }
+
+  /**
+   * Late completion watch (0.9.14, BUG 1): timeout is a state, not a
+   * verdict. For sidebar-path timeouts flagged `timeout_pending_late`,
+   * keep checking the Cline session (done-file first, then terminal
+   * session status — the same signals watchSidebarTask used) and revise
+   * the done record when Cline finishes. Runs on every idle poll.
+   */
+  private async checkLateWatches(cfg: BridgeConfig): Promise<void> {
+    const doneDir = path.join(cfg.repoPath, 'tasks', 'done');
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(doneDir).filter((f) => f.endsWith('.json'));
+    } catch {
+      return;
+    }
+    const nowIso = utcnow();
+    for (const f of files) {
+      const donePath = path.join(doneDir, f);
+      let done: any;
+      try {
+        done = readJson(donePath);
+      } catch {
+        continue;
+      }
+      if (done?.timeout_pending_late !== true) continue;
+      const id = typeof done.id === 'string' ? done.id : f.replace(/\.json$/, '');
+      if (!wantsLateWatch(done, nowIso)) {
+        // Window expired with no late completion — close the watch.
+        done.timeout_pending_late = false;
+        writeJsonAtomic(donePath, done);
+        await this.writeStatus(cfg, id, 'timeout', '', 'timed out (late-watch window closed, no completion seen)', {
+          late_watch: false,
+        });
+        await pushChanges(cfg.repoPath, `task ${id}: late watch closed`, this.out);
+        continue;
+      }
+      const sessionId = typeof done.late_session_id === 'string' ? done.late_session_id : null;
+      const messagesPath = typeof done.late_messages_path === 'string' ? done.late_messages_path : undefined;
+      const projectDir = this.projectDirForTask(cfg, done as BridgeTask);
+      const sentinelPath = path.join(projectDir, `.backseat-done-${id}`);
+
+      let late: LateOutcome | null = null;
+      // 1. Done-file handshake.
+      try {
+        if (fs.existsSync(sentinelPath)) {
+          const content = fs.readFileSync(sentinelPath, 'utf8');
+          try {
+            fs.unlinkSync(sentinelPath);
+          } catch {
+            /* already gone */
+          }
+          const firstLine = content.split('\n')[0].trim().toUpperCase();
+          const ok = firstLine === 'DONE';
+          late = {
+            result: ok ? 'success' : 'failed',
+            output: content.slice(0, 8000),
+            exitCode: ok ? 0 : 1,
+            transcriptTail: '',
+            transcriptStats: { messages: 0, errorsSeen: 0 },
+            linkedCommits: [],
+          };
+        }
+      } catch {
+        /* ignore */
+      }
+      // 2. Terminal session status.
+      if (!late && sessionId) {
+        const row = this.readSessionRow(sessionId);
+        const status = typeof row?.status === 'string' ? row.status : undefined;
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          late = {
+            result: status === 'completed' ? 'success' : status === 'cancelled' ? 'cancelled' : 'failed',
+            output: `Cline session ${status} after timeout.`,
+            exitCode: status === 'completed' ? 0 : 1,
+            transcriptTail: '',
+            transcriptStats: { messages: 0, errorsSeen: 0 },
+            linkedCommits: [],
+          };
+        }
+      }
+      if (!late) continue; // still working — keep watching
+
+      if (messagesPath) {
+        late.transcriptTail = transcriptTailOf(messagesPath);
+        late.transcriptStats = transcriptStats(messagesPath);
+      }
+      late.linkedCommits = await this.linkedCommitsFor(cfg, done as BridgeTask);
+      const finishedIso = utcnow();
+      const revised = applyLateResult(done, late, finishedIso);
+      writeJsonAtomic(donePath, revised);
+      this.out.appendLine(`[backseat] ${id}: late completion after timeout — ${late.result}`);
+      await this.writeStatus(
+        cfg,
+        id,
+        late.result,
+        tailLines(late.output),
+        `finished late: ${late.result} (was timeout at ${done.finished_at ?? '?'})`,
+        {
+          completed_late: true,
+          late_finished_at: finishedIso,
+          timed_out_at: done.finished_at,
+          transcript_tail: late.transcriptTail.slice(-1500) || undefined,
+          transcript_stats: late.transcriptStats,
+          linked_commits: late.linkedCommits,
+          checkpoint: (revised as any).checkpoint ?? undefined,
+        },
+      );
+      await pushChanges(cfg.repoPath, `task ${id}: late ${late.result}`, this.out);
+      await this.notifyNtfy(cfg, done as BridgeTask, late.result);
+    }
   }
 
   /**
@@ -1876,14 +2390,28 @@ class BridgeRunner {
     state: TaskState,
     logTail: string,
     progressNote: string,
+    extra: Record<string, unknown> = {},
   ): Promise<void> {
-    writeJsonAtomic(path.join(cfg.repoPath, 'tasks', 'status', `${taskId}.json`), {
+    const statusPath = path.join(cfg.repoPath, 'tasks', 'status', `${taskId}.json`);
+    // Merge with the existing record (0.9.14): claimed_at, started_at,
+    // deadline_at and other fields written at earlier lifecycle points
+    // must survive later updates — the old code rewrote the file from
+    // scratch and silently dropped them.
+    let prev: Record<string, unknown> = {};
+    try {
+      prev = readJson(statusPath) as Record<string, unknown>;
+    } catch {
+      /* fresh status — nothing to merge */
+    }
+    writeJsonAtomic(statusPath, {
+      ...prev,
       id: taskId,
       state,
       updated_at: utcnow(),
       heartbeat_at: utcnow(),
       log_tail: logTail.slice(-LOG_TAIL_BYTES),
       progress_note: progressNote,
+      ...extra,
     });
   }
 

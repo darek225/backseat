@@ -1,0 +1,9 @@
+[Unit]
+Description=Check Backseat muse-watch health every 10 minutes (%i)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

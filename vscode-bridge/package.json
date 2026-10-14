@@ -43,7 +43,7 @@
         },
         "backseat.defaultTimeoutSec": {
           "default": 1800,
-          "description": "Kill a running task after this many seconds (unless the task sets timeout_sec).",
+          "description": "Absolute cap: kill a running task after this many seconds (unless the task sets timeout_sec). Independent of activity \u2014 see backseat.inactivityTimeoutSec for the quiet-task timeout.",
           "type": "number"
         },
         "backseat.heartbeatSec": {
@@ -75,6 +75,26 @@
           "type": "string",
           "default": "",
           "description": "ntfy.sh topic for instant pings (optional). When set, the extension POSTs a notification on every task completion AND listens on the topic so new tasks wake it up in ~1s instead of waiting for the next poll. The topic is published to notify.json in the bridge repo so your Muse can discover it. Leave empty to disable; git polling still works."
+        },
+        "backseat.inactivityTimeoutSec": {
+          "default": 1800,
+          "description": "While a task runs, time out when Cline shows no activity (no transcript growth, no CLI output, no project-repo commits) for this many seconds \u2014 even if timeout_sec has not elapsed. Resets on any activity. 0 disables (only the absolute cap applies).",
+          "type": "number"
+        },
+        "backseat.lateWatchSec": {
+          "default": 7200,
+          "description": "After a sidebar-path timeout (Cline may still be working), keep watching the Cline session for a late completion for this many seconds, then revise the task record. 0 disables late watching.",
+          "type": "number"
+        },
+        "backseat.checkpointMin": {
+          "default": 15,
+          "description": "While a task runs, snapshot uncommitted project work to a backseat/<task-id> branch every N minutes (non-disruptive: branch, index and worktree untouched; ignored files excluded). 0 disables periodic checkpoints. Timeout checkpoints are controlled separately.",
+          "type": "number"
+        },
+        "backseat.checkpointOnTimeout": {
+          "default": true,
+          "description": "On any task timeout, snapshot uncommitted project work to a backseat/<task-id> branch and push it, so a timeout can never strand Cline's work. Runs even when checkpointMin is 0.",
+          "type": "boolean"
         }
       },
       "title": "Backseat"
@@ -146,6 +166,6 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.13",
+  "version": "0.9.14",
   "icon": "images/icon.png"
 }

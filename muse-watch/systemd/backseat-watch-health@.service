@@ -1,0 +1,7 @@
+[Unit]
+Description=Backseat muse-watch healthcheck (%i)
+
+[Service]
+Type=oneshot
+# %i is the watcher slug, e.g. darek225-MYbackseat
+ExecStart=%h/workspace/backseat-dev/muse-watch/healthcheck.sh %h/.backseat/muse-watch/%i

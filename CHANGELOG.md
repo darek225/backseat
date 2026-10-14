@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.9.14] - 2026-10-13
+### Fixed — bridge reliability (field bugs from the Oct 2026 UE5 task series, BACKSEAT_BUGS_2026-10-12.md)
+- **Timeout is a state, not a verdict.** On the sidebar path, a timeout no
+  longer ends the story: the extension keeps watching the Cline session
+  (done-file, then terminal session status) for `lateWatchSec` (default
+  2h) and revises the done record when Cline finishes — `result` becomes
+  the late outcome with `completed_late: true`, while `original_result`
+  / `timed_out_at` preserve the history. Timeout status records now carry
+  the transcript tail, `transcript_stats`, `last_activity_at`, and
+  `linked_commits` — the status file is what the architect reads, and it
+  previously said only "Timed out waiting…".
+- **Activity-based timeouts.** The deadline now resets on any sign of
+  life — transcript growth, CLI output, an auto-retry press, or a stage
+  commit pushed to the project repo. A task times out on
+  `inactivityTimeoutSec` (default 30m) of quiet, or the absolute
+  `timeout_sec` cap. Status records show `deadline_at` and
+  `last_activity_at` plus a one-line progress note (message count, last
+  tool, last visible text, stage commits).
+- **Commit evidence linked into task records.** `linked_commits` lists
+  project-repo commits landed during the task window; commits whose
+  message names the task id (staged pushes do) are marked `attributed`.
+- **Worktree checkpoints: timeouts can no longer strand work.** On
+  timeout (and every `checkpointMin`, default 15m, while running) the
+  extension snapshots uncommitted project work to a `backseat/<task-id>`
+  branch and pushes it — pure git plumbing, the user's branch/index/
+  worktree are untouched, ignored build artifacts excluded. `newProject`
+  now ships a default `.gitignore` so fresh projects don't checkpoint
+  gigabytes of artifacts.
+- **`claimed_at` vs `started_at`.** The task record and status now stamp
+  the claim instant separately from when Cline actually began work, so a
+  stall between claim and start is diagnosable. Status writes merge with
+  the existing record instead of rewriting it from scratch.
+- **muse-watch staleness.** `state.json` now carries `last_ok_at`,
+  `consecutive_failures`, and a `health` field; new `healthcheck.sh`
+  exits non-zero with a reason when the watcher goes stale, with systemd
+  timer examples in `muse-watch/systemd/`.
+- `protocol.md` documents the new fields, the timeout-as-state flow, and
+  the checkpoint-branch recovery procedure for the architect side.
+
 ## [0.9.13] - 2026-09-30
 ### Changed
 - Agent-agnostic positioning: Backseat is an open protocol (git + JSON),

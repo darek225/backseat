@@ -45,3 +45,20 @@ test('activitybar icon is not excluded from the VSIX', () => {
     }
   }
 });
+
+test('0.9.14 reliability settings are declared with defaults', () => {
+  // The extension reads these via vscode.workspace.getConfiguration('backseat').
+  // A typo'd key would silently fall back to code defaults and never be
+  // user-configurable — assert the contract.
+  const props = pkg.contributes.configuration.properties;
+  const expected = {
+    'backseat.inactivityTimeoutSec': 1800,
+    'backseat.lateWatchSec': 7200,
+    'backseat.checkpointMin': 15,
+    'backseat.checkpointOnTimeout': true,
+  };
+  for (const [key, def] of Object.entries(expected)) {
+    assert.ok(props[key], `missing setting: ${key}`);
+    assert.equal(props[key].default, def, `wrong default for ${key}`);
+  }
+});

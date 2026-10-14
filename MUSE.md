@@ -215,6 +215,31 @@ behind it. When one lands in `tasks/done/` with `result: failed`, read
   than ~15 minutes stale means the PC side died (VS Code closed, PC asleep).
   Move it back to `tasks/pending/` for a fresh attempt.
 
+### Timeouts (v0.9.14+): read the whole record, not just the verdict
+
+A `timeout` is a *state*, not a verdict — the same string once meant both
+"work completed and pushed" and "nothing ever landed". Before concluding
+anything from a timeout record, check these fields (all on the done record
+and/or the status record):
+
+- `completed_late` → the sidebar session finished *after* the timeout and
+  the record was revised: `result` is now the late outcome, with
+  `original_result: "timeout"` and `timed_out_at` preserving the history.
+  Treat it as the real outcome.
+- `linked_commits` → project-repo commits landed during the task window.
+  `attributed: true` means the commit message names the task id (staged
+  pushes do). Real progress, even under a timeout verdict.
+- `checkpoint.branch` → `backseat/<task-id>`: uncommitted work the
+  extension snapshotted on timeout (and every 15 min while running).
+  Recover it with `git fetch origin` in the project repo, inspect with
+  `git diff main...backseat/<id>`, then merge or cherry-pick.
+- `transcript_tail` / `transcript_stats` → what Cline was doing when the
+  deadline fired; `last_activity_at` says how long it had been quiet.
+- While running, the status record's `progress_note` is a live one-liner
+  (message count, last tool, last visible text, stage commits) and
+  `deadline_at` shows the current activity-based deadline — a quiet task
+  times out on inactivity, an active one only on the absolute `timeout_sec`.
+
 ## Reporting back
 
 When a task lands in `tasks/done/`, read its `result` and the final

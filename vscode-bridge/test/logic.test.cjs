@@ -393,3 +393,87 @@ test('attachTranscriptTail: no messagesPath leaves task unchanged', () => {
   assert.ok(!('transcript_tail' in out), 'no tail field added');
   assert.ok(!('transcript_stats' in out), 'no stats field added');
 });
+
+test('activityDeadline: activity resets the quiet clock', () => {
+  const started = 1_000_000;
+  const d1 = logic.activityDeadline({ startedAtMs: started, lastActivityMs: started + 1000, totalTimeoutMs: 3600_000, inactivityTimeoutMs: 1800_000, nowMs: started + 1_700_000 });
+  assert.equal(d1.timedOut, false, 'active 1700s < 1800s quiet cap');
+  const d2 = logic.activityDeadline({ startedAtMs: started, lastActivityMs: started + 1000, totalTimeoutMs: 3600_000, inactivityTimeoutMs: 1800_000, nowMs: started + 1_801_001 });
+  assert.equal(d2.timedOut, true, 'quiet past the cap');
+  assert.equal(d2.reason, 'inactivity');
+});
+
+test('activityDeadline: absolute cap wins over activity', () => {
+  const started = 1_000_000;
+  const d = logic.activityDeadline({ startedAtMs: started, lastActivityMs: started + 3_500_000, totalTimeoutMs: 3600_000, inactivityTimeoutMs: 1800_000, nowMs: started + 3_600_001 });
+  assert.equal(d.timedOut, true);
+  assert.equal(d.reason, 'total');
+});
+
+test('activityDeadline: disabled caps never fire', () => {
+  const d = logic.activityDeadline({ startedAtMs: 0, lastActivityMs: 0, totalTimeoutMs: 0, inactivityTimeoutMs: 0, nowMs: 1e12 });
+  assert.equal(d.timedOut, false);
+  assert.equal(d.deadlineMs, Infinity);
+  assert.equal(d.reason, null);
+});
+
+test('linkedCommits: attribution by task id', () => {
+  const out = logic.linkedCommits([
+    { sha: 'abc', subject: '[backseat:task:2026-10-12-voxel-9] stage 1 grass mesh' },
+    { sha: 'def', subject: 'random other work' },
+  ], '2026-10-12-voxel-9');
+  assert.equal(out.length, 2);
+  assert.equal(out[0].attributed, true);
+  assert.equal(out[1].attributed, false);
+  assert.deepEqual(logic.linkedCommits(null, 'x'), []);
+  assert.deepEqual(logic.linkedCommits(undefined, 'x'), []);
+});
+
+test('checkpointBranchName: sanitizes task ids', () => {
+  assert.equal(logic.checkpointBranchName('2026-10-12-voxel-9'), 'backseat/2026-10-12-voxel-9');
+  assert.equal(logic.checkpointBranchName('weird id/with spaces!'), 'backseat/weird-id-with-spaces');
+  assert.equal(logic.checkpointBranchName(''), 'backseat/task');
+});
+
+test('transcriptProgress: last text and tool', () => {
+  const chunks = [
+    { label: 'ask:api_req_failed', kind: 'api_req_failed', text: 'api_req_failed 429' },
+    { label: 'assistant', kind: 'assistant', text: 'assistant using tool: write_to_file' },
+    { label: 'say:text', kind: 'text', text: 'Edited VoxelWorld.cpp, compiling now' },
+  ];
+  const p = logic.transcriptProgress(chunks);
+  assert.equal(p.lastTool, 'write_to_file');
+  assert.ok(p.lastText.includes('Edited VoxelWorld.cpp'));
+  assert.deepEqual(logic.transcriptProgress([]), { lastText: '', lastTool: '' });
+});
+
+test('buildProgressNote: compact one-liner', () => {
+  const note = logic.buildProgressNote({ messages: 107, errorsSeen: 2, lastText: 'Edited VoxelWorld.cpp', lastTool: 'write_to_file', commitCount: 2, minutesActive: 41 });
+  assert.ok(note.includes('107 msgs'));
+  assert.ok(note.includes('2 provider errors'));
+  assert.ok(note.includes('write_to_file'));
+  assert.ok(note.includes('2 stage commits'));
+  assert.ok(note.includes('41m active'));
+  const quiet = logic.buildProgressNote({ messages: 3, errorsSeen: 0, lastText: '', lastTool: '', commitCount: 0, minutesActive: 1 });
+  assert.ok(!quiet.includes('provider errors') && !quiet.includes('stage commits'));
+});
+
+test('applyLateResult: timeout revised, history preserved', () => {
+  const done = { id: 't', result: 'timeout', finished_at: 'T0', exit_code: 124 };
+  const late = { result: 'success', output: 'done it', exitCode: 0, transcriptTail: '[say:text] done', transcriptStats: { messages: 5, errorsSeen: 0 }, linkedCommits: [] };
+  const out = logic.applyLateResult(done, late, 'T1');
+  assert.equal(out.result, 'success');
+  assert.equal(out.original_result, 'timeout');
+  assert.equal(out.completed_late, true);
+  assert.equal(out.timed_out_at, 'T0');
+  assert.equal(out.late_finished_at, 'T1');
+  assert.equal(out.late_watch, false);
+  assert.equal(out.error, null);
+});
+
+test('wantsLateWatch: only flagged records inside the window', () => {
+  assert.equal(logic.wantsLateWatch({ timeout_pending_late: true, late_watch_until: '2026-10-13T00:00:00Z' }, '2026-10-12T23:00:00Z'), true);
+  assert.equal(logic.wantsLateWatch({ timeout_pending_late: true, late_watch_until: '2026-10-12T22:00:00Z' }, '2026-10-12T23:00:00Z'), false);
+  assert.equal(logic.wantsLateWatch({ result: 'timeout' }, '2026-10-12T23:00:00Z'), false);
+  assert.equal(logic.wantsLateWatch(null, 'x'), false);
+});
