@@ -582,3 +582,191 @@ export function isClaimedByDeadRunner(
   if (!m) return false;
   return !pidAlive(parseInt(m[1], 10));
 }
+
+// ---------------------------------------------------------------------------
+// Activity-based deadlines (0.9.14)
+//
+// A fixed wall-clock timeout cannot tell "working fine, 80% done" from
+// "dead at minute 2" — field evidence from the Oct 2026 UE5 task series
+// (BACKSEAT_BUGS_2026-10-12.md). Backseat now tracks ACTIVITY (transcript
+// growth, CLI output bytes, stage commits pushed to the project repo) and
+// only declares a timeout when the task goes quiet for
+// `inactivityTimeoutMs`, OR when the absolute `timeout_sec` cap is hit.
+// Timeout is then a *state*, not a *verdict*: on the sidebar path the
+// extension keeps watching for a late completion and revises the record.
+// ---------------------------------------------------------------------------
+
+export interface ActivityDeadlineInput {
+  startedAtMs: number;
+  lastActivityMs: number;
+  /** Absolute cap from task.timeout_sec (ms); <= 0 means no cap. */
+  totalTimeoutMs: number;
+  /** Quiet cap (ms); <= 0 means no cap. */
+  inactivityTimeoutMs: number;
+  nowMs: number;
+}
+
+export interface ActivityDeadline {
+  /** Earliest epoch-ms at which the task times out (Infinity when uncapped). */
+  deadlineMs: number;
+  timedOut: boolean;
+  reason: 'inactivity' | 'total' | null;
+}
+
+export function activityDeadline(i: ActivityDeadlineInput): ActivityDeadline {
+  const total = i.totalTimeoutMs > 0 ? i.startedAtMs + i.totalTimeoutMs : Infinity;
+  const quiet =
+    i.inactivityTimeoutMs > 0 ? i.lastActivityMs + i.inactivityTimeoutMs : Infinity;
+  const deadlineMs = Math.min(total, quiet);
+  if (deadlineMs === Infinity || i.nowMs < deadlineMs) {
+    return { deadlineMs, timedOut: false, reason: null };
+  }
+  return { deadlineMs, timedOut: true, reason: total <= quiet ? 'total' : 'inactivity' };
+}
+
+/** One project-repo commit linked to a task window (see linkedCommits). */
+export interface LinkedCommit {
+  sha: string;
+  subject: string;
+  /** True when the commit message names the task id (staged pushes do). */
+  attributed: boolean;
+}
+
+/**
+ * Link project-repo commits landed during a task's window into the task
+ * record as evidence. Commits whose message names the task id are
+ * `attributed`; everything else in the window is listed unattributed so
+ * the architect can judge. Never throws on junk input.
+ */
+export function linkedCommits(
+  commits: { sha: string; subject: string }[] | null | undefined,
+  taskId: string,
+): LinkedCommit[] {
+  if (!Array.isArray(commits)) return [];
+  const needle = String(taskId || '').toLowerCase();
+  return commits.map((c) => ({
+    sha: String(c?.sha ?? ''),
+    subject: String(c?.subject ?? ''),
+    attributed: needle !== '' && String(c?.subject ?? '').toLowerCase().includes(needle),
+  }));
+}
+
+/**
+ * Branch name for the non-disruptive worktree checkpoint. The checkpoint
+ * commit is built with `git stash create -u` (worktree snapshot without
+ * touching the user's branch/index), so it must never be a name the user
+ * would use. Sanitized to valid git ref characters.
+ */
+export function checkpointBranchName(taskId: string): string {
+  const safe =
+    String(taskId || '')
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'task';
+  return `backseat/${safe}`;
+}
+
+/**
+ * Turn parsed transcript chunks into a short progress summary: the last
+ * user-visible text (skipping provider-error payloads) and the last tool
+ * Cline reached for. Pure — the caller feeds parseTranscriptChunks().
+ */
+export function transcriptProgress(chunks: TranscriptChunk[]): {
+  lastText: string;
+  lastTool: string;
+} {
+  let lastText = '';
+  let lastTool = '';
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const c = chunks[i];
+    if (!lastTool) {
+      const m = /using tool: ([A-Za-z0-9_.-]+)/.exec(c.text);
+      if (m) lastTool = m[1];
+    }
+    if (!lastText && !/api_req_failed/i.test(c.label) && c.text.trim().length > 8) {
+      lastText = c.text.replace(/\s+/g, ' ').trim().slice(0, 140);
+    }
+    if (lastText && lastTool) break;
+  }
+  return { lastText, lastTool };
+}
+
+export interface ProgressNoteInput {
+  messages: number;
+  errorsSeen: number;
+  lastText: string;
+  lastTool: string;
+  commitCount: number;
+  minutesActive: number;
+}
+
+/**
+ * One compact line for the status record's progress_note, e.g.
+ * "transcript 107 msgs · 2 provider errors · last tool: write_to_file ·
+ * last: edited VoxelWorld.cpp … · 2 stage commits · 41m active".
+ */
+export function buildProgressNote(p: ProgressNoteInput): string {
+  const parts: string[] = [`transcript ${Math.max(0, Math.floor(p.messages))} msgs`];
+  if (p.errorsSeen > 0) parts.push(`${p.errorsSeen} provider error${p.errorsSeen === 1 ? '' : 's'}`);
+  if (p.lastTool) parts.push(`last tool: ${p.lastTool}`);
+  if (p.lastText) parts.push(`last: ${p.lastText.slice(0, 90)}`);
+  if (p.commitCount > 0) parts.push(`${p.commitCount} stage commit${p.commitCount === 1 ? '' : 's'}`);
+  parts.push(`${Math.max(0, Math.round(p.minutesActive))}m active`);
+  return parts.join(' · ');
+}
+
+/** Late completion observed after a sidebar-path timeout. */
+export interface LateOutcome {
+  result: 'success' | 'failed' | 'cancelled';
+  output: string;
+  exitCode: number;
+  transcriptTail: string;
+  transcriptStats: TranscriptStats;
+  linkedCommits: LinkedCommit[];
+}
+
+/**
+ * Merge a late completion into a timeout done record. The original
+ * timeout verdict is preserved (`original_result`, `timed_out_at`) so
+ * nothing already read becomes a lie — but `result` now says what
+ * actually happened, with `completed_late: true`. This is the "timeout
+ * is a state, not a verdict" rule from BACKSEAT_BUGS_2026-10-12.md.
+ */
+export function applyLateResult<T extends Record<string, unknown>>(
+  done: T,
+  late: LateOutcome,
+  nowIso: string,
+): T & Record<string, unknown> {
+  return {
+    ...done,
+    original_result: done['result'],
+    result: late.result,
+    exit_code: late.exitCode,
+    error: late.result === 'success' ? null : tailLines(late.output, 20) || 'no output',
+    completed_late: true,
+    timed_out_at: done['finished_at'],
+    late_finished_at: nowIso,
+    finished_at: nowIso,
+    late_output_tail: late.output.slice(-2000),
+    transcript_tail: late.transcriptTail,
+    transcript_stats: late.transcriptStats,
+    linked_commits: late.linkedCommits,
+    late_watch: false,
+    timeout_pending_late: false,
+  };
+}
+
+/**
+ * Decide whether a finished timeout record still wants late watching.
+ * True only for sidebar-path timeouts (the process may still be running)
+ * inside the configured window.
+ */
+export function wantsLateWatch(
+  done: Record<string, unknown> | null | undefined,
+  nowIso: string,
+): boolean {
+  if (!done || typeof done !== 'object') return false;
+  if (done['timeout_pending_late'] !== true) return false;
+  const until = done['late_watch_until'];
+  if (typeof until !== 'string' || until <= nowIso) return false;
+  return true;
+}

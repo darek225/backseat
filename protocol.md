@@ -85,11 +85,28 @@ Created by the architect. Moved (not copied) through `active` → `done` by the 
   "exit_code": 0,                      // integer, cline's exit code (if ran)
   "attempts": 1,                       // integer, total Cline attempts including retries
   "error_kind": "transient",           // "transient" | "no_credits" | "context_overflow" | "timeout" | "failed"
+  "claimed_at": "2026-09-28T00:30:55Z", // 0.9.14: when the watcher claimed the task (vs started_at below)
   "started_at": "2026-09-28T00:31:05Z",
   "finished_at": "2026-09-28T00:44:12Z",
   "error": null,                       // string | null, human-readable failure reason
   "transcript_tail": "[say:text] ...", // last Cline session messages at completion
-  "transcript_stats": { "messages": 42, "errorsSeen": 1 }
+  "transcript_stats": { "messages": 42, "errorsSeen": 1 },
+
+  // 0.9.14 — timeout is a STATE, not a verdict (see "Timeouts" below)
+  "timeout_pending_late": true,        // sidebar-path timeout: still watching for a late finish
+  "late_watch_until": "2026-09-28T02:44:12Z",
+  "completed_late": true,              // the late finish landed; result is the late outcome
+  "original_result": "timeout",        // what the first verdict said
+  "timed_out_at": "2026-09-28T00:44:12Z",
+  "late_finished_at": "2026-09-28T01:03:00Z",
+  "linked_commits": [                  // project-repo commits landed during the task window
+    { "sha": "1fce6af…", "subject": "[backseat:task:…] stage 1", "attributed": true }
+  ],
+  "checkpoint": {                      // non-disruptive worktree snapshot (see "Checkpoints")
+    "branch": "backseat/20260928-001-auth", "sha": "e83f6af…",
+    "reason": "timeout", "at": "2026-09-28T00:44:12Z"
+  },
+  "worktree_base": "a3f9c21…"          // project-repo HEAD when the task started
 }
 ```
 
@@ -104,10 +121,13 @@ the private bridge repo (never in logs).
 
 On a **timeout**, read `transcript_tail` before deciding what to do next:
 it shows where Cline actually got stuck (mid-edit, provider-error loop,
-awaiting input, or genuinely still working). Re-queue a narrower task
-targeted at what the tail shows instead of blindly repeating the same
-open-ended prompt — repeating the same prompt usually times out the same
-way.
+awaiting input, or genuinely still working). Also check `completed_late`
+(the sidebar session may have finished after the verdict),
+`linked_commits` (staged pushes are evidence of real progress), and
+`checkpoint.branch` (uncommitted work is recoverable there). Re-queue a
+narrower task targeted at what the tail shows instead of blindly
+repeating the same open-ended prompt — repeating the same prompt usually
+times out the same way.
 
 **Rules:**
 
@@ -183,7 +203,21 @@ This is the fast path for "what's happening right now".
   "updated_at": "2026-09-28T00:35:00Z", // string, ISO-8601 UTC, every write bumps this
   "heartbeat_at": "2026-09-28T00:35:00Z", // string, ISO-8601 UTC, bumped every ~30s while running
   "log_tail": "...last ~40 lines of cline output...", // string
-  "progress_note": "optional short note" // string, e.g. "tests passing, polishing UI"
+  "progress_note": "optional short note", // string, e.g. "tests passing, polishing UI"
+
+  // 0.9.14 — written once at the relevant lifecycle point, then preserved
+  // (status writes merge; they never rewrite from scratch):
+  "claimed_at": "2026-09-28T00:30:55Z",   // claim instant (BUG 3: distinct from start)
+  "started_at": "2026-09-28T00:31:05Z",   // Cline actually began
+  "last_activity_at": "2026-09-28T00:40:12Z", // last sign of life (transcript/output/commit)
+  "deadline_at": "2026-09-28T01:10:12Z",  // current activity-based deadline (absent = uncapped)
+  "transcript_tail": "[say:text] ...",    // on timeouts: what Cline was doing (bounded)
+  "transcript_stats": { "messages": 42, "errorsSeen": 1 }, // on timeouts
+  "linked_commits": [ ... ],              // as in the task record
+  "checkpoint": { "branch": "backseat/…", "sha": "…", "reason": "periodic", "at": "…" },
+  "late_watch": true,                     // timeout state: still watching for a late finish
+  "late_watch_until": "2026-09-28T02:44:12Z",
+  "completed_late": true                  // set when the late finish revised the record
 }
 ```
 
@@ -195,6 +229,60 @@ This is the fast path for "what's happening right now".
 - On completion the watcher writes the terminal state (`success`,
   `failed`, `cancelled`, `timeout`) once more, then stops updating it.
 - The architect never writes status files; it only reads them.
+
+## Timeouts (0.9.14: a state, not a verdict)
+
+A fixed wall-clock timeout cannot tell "working fine, 80% done" from
+"dead at minute 2" — the same `timeout` string once meant both "work
+completed and pushed" and "nothing ever landed". Backseat now treats
+timeout as a *state* with a recovery path:
+
+**Activity-based deadline.** While a task runs, any sign of life resets
+the quiet clock: transcript growth, CLI output bytes, an auto-retry
+press, or a stage commit pushed to the project repo. The task times out
+when it goes quiet for `backseat.inactivityTimeoutSec` (default 1800s)
+or hits the absolute `timeout_sec` cap, whichever comes first.
+`timeout_sec: 0` disables the absolute cap; `inactivityTimeoutSec: 0`
+disables the quiet cap. Status records show the current `deadline_at`
+and `last_activity_at` so the architect can see the reasoning.
+
+**Timeout records carry evidence.** On timeout the status record gets
+the bounded transcript tail, `transcript_stats`, `last_activity_at`,
+and `linked_commits` (project-repo commits landed during the task
+window — staged pushes show up here even when the verdict says
+timeout). The done record keeps the full tail as before.
+
+**Late completion (sidebar path only).** On the CLI path the process
+was killed, so timeout is final. On the sidebar path Cline may still be
+working, so the watcher keeps watching for `backseat.lateWatchSec`
+(default 7200s): done-file first, then terminal session status — the
+same signals as the main watch loop. When Cline finishes, the done
+record is revised: `result` becomes the late outcome,
+`completed_late: true`, and the original verdict is preserved as
+`original_result` / `timed_out_at` so nothing already read becomes a
+lie. The status state updates to the late outcome with
+`progress_note: "finished late: …"`. If the window closes with no
+finish, the watch is dropped (`late_watch: false`).
+
+## Worktree checkpoints (0.9.14)
+
+A timeout must never strand uncommitted work. On every timeout — and
+every `backseat.checkpointMin` minutes (default 15, `0` disables) while
+a task runs — the watcher snapshots the project worktree to a
+`backseat/<task-id>` branch and pushes it. The snapshot is pure git
+plumbing (`add -A` → `write-tree` → `commit-tree` → `update-ref`,
+with the index restored exactly afterwards): the user's branch, index,
+and working tree are untouched, ignored files (build output,
+`node_modules`, UE `Binaries/…`) are excluded by git's own rules, and
+the architect can recover or merge the branch later. `newProject`
+ships a default `.gitignore` so fresh projects don't checkpoint
+gigabytes of artifacts. The checkpoint is recorded on the task as
+`checkpoint: { branch, sha, reason, at }`.
+
+**Architect recovery recipe:** `git fetch origin` in the project repo,
+inspect `backseat/<task-id>` (`git log`, `git diff main...backseat/<id>`),
+then merge or cherry-pick onto your working branch. The branch is
+extension-owned and force-pushed on each checkpoint.
 
 ## Example: full lifecycle
 
@@ -216,7 +304,7 @@ models). The watcher retries instead of stalling:
 | `error_kind` | Meaning | Watcher behavior |
 |---|---|---|
 | `transient` | Rate limit, 429, overloaded, network error | Retries with backoff (2 min, then 10 min), up to `max_retries` (default 2) |
-| `timeout` | Cline exceeded `timeout_sec` | Retried like transient on the CLI path (the process was killed, so it's safe). Never auto-retried on the extension-API path — the task may still be running in the sidebar, and retrying would run the prompt twice |
+| `timeout` | Cline exceeded the activity deadline (quiet too long) or `timeout_sec` | Retried like transient on the CLI path (the process was killed, so it's safe). Never auto-retried on the extension-API path — the task may still be running in the sidebar, and retrying would run the prompt twice; instead the late watch revises the record if it finishes |
 | `no_credits` | Out of credits / quota / billing | Fails immediately, no retries — retrying can't help |
 | `context_overflow` | Context / token limit exceeded | Fails immediately — retrying the same prompt would fail identically; the architect splits the task instead |
 | `failed` | Anything else | Fails immediately; architect triages |

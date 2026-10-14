@@ -4,6 +4,7 @@
 #   install.sh <repo>      install + start watching a bridge repo
 #                          <repo> = owner/repo slug or full git URL
 #   install.sh status      show daemon status + state freshness
+#   install.sh health      run healthcheck.sh on every installed watcher
 #   install.sh stop        stop all watchers
 #
 # Layout: ~/.backseat/muse-watch/<owner-repo>/
@@ -36,6 +37,21 @@ case "$cmd" in
       echo "$(basename "$d"): $st, state updated $fresh"
     done
     [ "$found" = 0 ] && echo "no watchers installed"
+    ;;
+  health)
+    rc=0
+    for d in "$BASE"/*/; do
+      [ -d "$d" ] || continue
+      slug="$(basename "$d")"
+      if "$SRC_DIR/healthcheck.sh" "$d"; then
+        echo "$slug: healthy"
+      else
+        echo "$slug: UNHEALTHY"
+        rc=1
+      fi
+    done
+    [ "$rc" = 0 ] && echo "all watchers healthy" || true
+    exit "$rc"
     ;;
   stop)
     for pidfile in "$BASE"/*/watch.pid; do
