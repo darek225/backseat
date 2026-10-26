@@ -1,0 +1,8 @@
+# Sole codeowner: Darek Anderson (@darek225).
+# Approval flow: Muse presents the PR summary and evidence to Darek in chat;
+# his chat verdict is the approval of record. He does not review in the GitHub UI.
+
+*  @darek225
+/vscode-bridge/ @darek225
+/protocol.md @darek225
+/.github/ @darek225
